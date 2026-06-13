@@ -1,0 +1,109 @@
+# This file demonstrates how an application can build a challenge-protected
+# space API on top of generic Artur process endpoints.
+#
+# Artur does not hardcode ALTCHA, wallets, blockchains, or databases here.
+# These endpoints call external commands/scripts that you own.
+version = 1
+
+[server]
+bind = "127.0.0.1"
+port = 46796
+body_limit_bytes = 1048576
+
+# POST /v1/challenge -> runs the external `challenge` CLI.
+# If your crate exposes a different binary name or flags, only this TOML changes.
+[[endpoints]]
+name = "create_challenge"
+method = "POST"
+path = "/v1/challenge"
+action = "process.run"
+process = "challenge_create"
+
+[[processes]]
+name = "challenge_create"
+mode = "sync"
+command = "challenge"
+args = [
+  "create",
+  "--cost", "5000",
+  "--random-counter",
+  "--expires-in", "600",
+  "--hmac-secret", "{{env.ARTUR_CHALLENGE_HMAC_SECRET}}",
+  "--hmac-key-secret", "{{env.ARTUR_CHALLENGE_HMAC_KEY_SECRET}}",
+]
+timeout_ms = 10000
+stdout_format = "json"
+
+[processes.stdin]
+type = "none"
+
+# POST /v1/space -> delegates verification and creation to your application script.
+# The script can run:
+#   challenge verify --challenge ... --solution ... --secret ... --key-secret ...
+# and then create a sid, allocate addresses, persist balances/deposits/expenses, etc.
+[[endpoints]]
+name = "create_space"
+method = "POST"
+path = "/v1/space"
+action = "process.run"
+process = "space_create"
+
+[[processes]]
+name = "space_create"
+mode = "sync"
+command = "python3"
+args = ["examples/scripts/space_create.py"]
+timeout_ms = 30000
+stdout_format = "json"
+
+[processes.env]
+ARTUR_CHALLENGE_HMAC_SECRET = "{{env.ARTUR_CHALLENGE_HMAC_SECRET}}"
+ARTUR_CHALLENGE_HMAC_KEY_SECRET = "{{env.ARTUR_CHALLENGE_HMAC_KEY_SECRET}}"
+ARTUR_SPACE_DB = "{{env.ARTUR_SPACE_DB}}"
+
+[processes.stdin]
+type = "body"
+
+# GET /v1/space/{sid} -> delegates lookup to the same application layer.
+[[endpoints]]
+name = "get_space_by_path"
+method = "GET"
+path = "/v1/space/{sid}"
+action = "process.run"
+process = "space_get"
+
+[[processes]]
+name = "space_get"
+mode = "sync"
+command = "python3"
+args = ["examples/scripts/space_get.py", "--sid", "{{param.sid}}"]
+timeout_ms = 10000
+stdout_format = "json"
+
+[processes.env]
+ARTUR_SPACE_DB = "{{env.ARTUR_SPACE_DB}}"
+
+[processes.stdin]
+type = "none"
+
+# Optional header form: GET /v1/space/ with header `sid: ...`.
+[[endpoints]]
+name = "get_space_by_header"
+method = "GET"
+path = "/v1/space/"
+action = "process.run"
+process = "space_get_by_header"
+
+[[processes]]
+name = "space_get_by_header"
+mode = "sync"
+command = "python3"
+args = ["examples/scripts/space_get.py", "--sid", "{{header.sid}}"]
+timeout_ms = 10000
+stdout_format = "json"
+
+[processes.env]
+ARTUR_SPACE_DB = "{{env.ARTUR_SPACE_DB}}"
+
+[processes.stdin]
+type = "none"

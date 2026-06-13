@@ -1,0 +1,9 @@
+target/
+.git/
+.github/
+.opencode/
+**/node_modules/
+Dockerfile
+.dockerignore
+*.sqlite3
+*.log

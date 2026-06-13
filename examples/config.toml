@@ -1,0 +1,64 @@
+# Artur configuration schema version. Keep this as 1 until a future breaking schema exists.
+version = 1
+
+[server]
+bind = "127.0.0.1"
+port = 46796
+body_limit_bytes = 1048576
+
+# A simple static endpoint. Artur itself does not know what this endpoint "means";
+# the behavior is entirely declared in TOML.
+[[endpoints]]
+name = "hello"
+method = "GET"
+path = "/v1/hello"
+action = "respond.static"
+
+[endpoints.response]
+status = 200
+body = { ok = true, service = "artur" }
+headers = { cache-control = "no-store" }
+
+# A synchronous process endpoint. It pipes the HTTP body to stdin and returns stdout/stderr.
+[[endpoints]]
+name = "echo"
+method = "POST"
+path = "/v1/process/echo/{name}"
+action = "process.run"
+process = "echo_json"
+
+[[processes]]
+name = "echo_json"
+mode = "sync"
+command = "python3"
+args = ["examples/scripts/echo.py", "--name", "{{param.name}}", "--source", "{{query.source}}"]
+timeout_ms = 30000
+stdout_format = "json"
+
+[processes.stdin]
+type = "request_json"
+
+# An asynchronous process endpoint. It starts work immediately and returns a job_id.
+[[endpoints]]
+name = "long_task"
+method = "POST"
+path = "/v1/process/long-task"
+action = "process.run"
+process = "long_task"
+
+[[processes]]
+name = "long_task"
+mode = "async"
+command = "python3"
+args = ["examples/scripts/long_task.py"]
+timeout_ms = 60000
+stdout_format = "json"
+
+[processes.stdin]
+type = "body"
+
+[[endpoints]]
+name = "get_job"
+method = "GET"
+path = "/v1/jobs/{job_id}"
+action = "job.get"
