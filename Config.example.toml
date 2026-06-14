@@ -1,0 +1,334 @@
+# =============================================================================
+#  Artur — Comprehensive Configuration Reference
+# =============================================================================
+#  Every available parameter is listed below with a comment explaining its
+#  purpose and default value.  Only `version` and at least one endpoint are
+#  required; all other sections and keys are optional.
+#
+#  Usage:
+#    artur --config Config.example.toml            # local file
+#    artur --config https://example.com/cfg.toml    # fetch over HTTP(S)
+#
+#  CLI overrides:
+#    --config <PATH|URL>   Path or URL to the TOML config (env: ARTUR_CONFIG)
+#    --port <PORT>         Override [artur.server].port at runtime (env: ARTUR_PORT)
+# =============================================================================
+
+
+# ---- Root ------------------------------------------------------------------
+# Schema version.  Must be exactly 1.  (required)
+version = 1
+
+
+# ---- Logging ---------------------------------------------------------------
+# Tracing/log configuration.  Falls back to the RUST_LOG environment variable
+# if it is set; otherwise uses the `level` value below.
+[log]
+
+# RUST_LOG-style filter string (e.g. "artur=debug,tower_http=info").
+# Default (when both log.level and RUST_LOG are unset): "artur=info,tower_http=info"
+level = "artur=info,tower_http=info"
+
+# Output format.  Recognised values depend on the tracing subscriber;
+# commonly "json" or "pretty".  (optional)
+# format = "json"
+
+# File path for log output.  When unset logs go to stderr.  (optional)
+# file = "/var/log/artur.log"
+
+
+# ---- Runtime ---------------------------------------------------------------
+[runtime]
+
+# Number of Tokio worker threads for the async runtime.  (optional)
+# worker_threads = 4
+
+# Graceful-shutdown timeout in seconds.  (optional)
+# shutdown_timeout_secs = 30
+
+# Temporary directory for file-based operations.  (optional)
+# tmp_dir = "/tmp/artur"
+
+# Maximum HTTP payload size in bytes (used if neither http.max_body_bytes
+# nor artur.server.body_limit_bytes is set).  (optional)
+# max_payload_bytes = 1048576
+
+
+# ---- HTTP defaults ---------------------------------------------------------
+# These cascade into the final server configuration.  Values in [artur.server]
+# take priority, then [http], then [runtime] for body limits.
+[http]
+
+# Bind address (e.g. "0.0.0.0" or "127.0.0.1").  (optional)
+# bind = "0.0.0.0"
+
+# Listening port.  (optional)
+# port = 8080
+
+# URL prefix prepended to every endpoint path (e.g. "v1").  (optional)
+# prefix = "v1"
+
+# Maximum request body size in bytes.  (optional)
+# max_body_bytes = 1048576
+
+# Global API key applied to all endpoints that don't define their own.  (optional)
+# api_key = "secret"
+
+
+# ---- Filesystem paths -------------------------------------------------------
+# Arbitrary keyed paths for cross-package compatibility.
+# [paths.assets]
+# path = "/data/assets"
+# format = "json"        # optional format hint
+
+
+# ---- HTTP transports -------------------------------------------------------
+# Reusable outgoing HTTP profiles referenced by workflow steps.
+
+# [transports.http.ladon]
+# base_url = "http://ladon:4010/v1"      # base URL for all requests (required)
+# timeout_ms = 30000                     # default request timeout in ms (optional)
+#
+# [transports.http.ladon.headers]        # default headers added to every request
+# authorization = "Bearer {{env.LADON_API_KEY}}"
+# content-type = "application/json"
+
+
+# ---- Stores (databases) ----------------------------------------------------
+# Keyed SQL database profiles.  Currently the built-in executor supports
+# sqlite; postgres is accepted by the schema but requires an external task.
+
+# [stores.main]
+# driver = "sqlite"                      # "sqlite" or "postgres" (required)
+# url = "sqlite://data/app.db"           # connection URL (required)
+# migrate = true                         # reserved for auto-migration (optional)
+# connect_timeout_secs = 10              # connection timeout in seconds (optional)
+# max_connections = 8                    # max connection pool size (optional)
+
+
+# ---- Artur server ----------------------------------------------------------
+# Highest-priority server settings (overrides [http] and [runtime]).
+[artur.server]
+
+# bind = "127.0.0.1"        # default: "127.0.0.1"
+# port = 46796              # default: 46796
+# body_limit_bytes = 1048576  # default: 1_048_576 (1 MiB)
+
+
+# =============================================================================
+#  TASKS
+# =============================================================================
+# Each [[artur.tasks]] entry defines an external process that Artur can run.
+# Tasks are referenced by name from endpoints and workflow steps.
+
+# --- Synchronous task -------------------------------------------------------
+[[artur.tasks]]
+name = "echo"                       # unique name (required)
+mode = "sync"                       # "sync" (block) or "async" (return job_id); default: "sync"
+command = "python3"                 # executable (required)
+args = [                            # command-line arguments; supports templates
+    "scripts/echo.py",
+    "--name", "{{param.name}}",
+    "--source", "{{query.source}}",
+]
+# Environment variables set for the child process; supports templates.
+# [artur.tasks.env]
+# MY_VAR = "{{env.HOME}}"
+# working_dir = "/tmp"                # working directory (optional)
+inherit_env = true                  # inherit parent env vars; default: true
+success_exit_codes = [0]            # exit codes that mean success; default: [0]
+timeout_ms = 30000                  # max wall-clock time in ms; default: 30_000
+max_stdout_bytes = 1048576          # max stdout captured; default: 1_048_576
+max_stderr_bytes = 1048576          # max stderr captured; default: 1_048_576
+stdout_format = "json"              # "text" (raw) or "json" (parse as JSON); default: "text"
+
+# Stdin piped to the process.  Variants:
+#   type = "none"           — no stdin  (default)
+#   type = "body"           — raw request body text
+#   type = "request_json"   — full request context as compact JSON
+#   type = "template"       — custom template string
+#     template = "Hello {{param.name}}"
+[artur.tasks.stdin]
+type = "request_json"
+
+
+# --- Asynchronous task ------------------------------------------------------
+[[artur.tasks]]
+name = "long_job"
+mode = "async"
+command = "python3"
+args = ["scripts/long_job.py"]
+timeout_ms = 120000
+stdout_format = "json"
+
+[artur.tasks.stdin]
+type = "body"
+
+
+# =============================================================================
+#  ENDPOINTS
+# =============================================================================
+# Each [[artur.endpoints]] entry declares one HTTP route.
+# Supported actions:
+#   "respond.static"  — return a static JSON response
+#   "task.run"        — execute a task and return its output
+#   "workflow.run"    — run a multi-step workflow
+#   "job.get"         — poll an async task's job status
+
+# --- 1. Static response endpoint --------------------------------------------
+[[artur.endpoints]]
+name = "health"                     # unique name (required)
+method = "GET"                      # GET | POST | PUT | PATCH | DELETE (required)
+path = "/health"                    # URL path; supports {param} and :param placeholders (required)
+action = "respond.static"           # (required)
+# body_limit_bytes = 65536          # per-endpoint body limit override (optional)
+
+[artur.endpoints.response]
+status = 200                        # HTTP status code; default: 200
+body = { ok = true, service = "artur" }   # JSON response body; supports templates; default: {}
+# [artur.endpoints.response.headers]
+# cache-control = "no-store"
+
+
+# --- 2. Task-run endpoint ---------------------------------------------------
+[[artur.endpoints]]
+name = "echo_call"
+method = "POST"
+path = "/v1/echo/{name}"
+action = "task.run"
+task = "echo"                       # references a [[artur.tasks]] entry (required)
+
+
+# --- 3. Job-get endpoint (poll async task result) ---------------------------
+[[artur.endpoints]]
+name = "get_job"
+method = "GET"
+path = "/v1/jobs/{job_id}"          # must contain {job_id} or :job_id
+action = "job.get"
+
+
+# --- 4. Workflow endpoint (multi-step) --------------------------------------
+[[artur.endpoints]]
+name = "compose"
+method = "POST"
+path = "/v1/compose"
+action = "workflow.run"
+
+# Workflow result configuration.
+[artur.endpoints.result]
+status = 200                        # HTTP status code; default: 200
+# body — JSON response body; supports templates.
+#   When null (the default) the last "respond" step's value is used,
+#   or an empty object if there is no respond step.
+#   When set explicitly, include_steps controls whether step outputs
+#   are merged in.
+body = { ok = true, result = "{{steps.fetch.data}}" }
+# [artur.endpoints.result.headers]
+# x-custom = "value"
+include_steps = false               # include step outputs in response; default: true
+
+# Workflow steps execute in dependency order.
+# --- Step: run an external task ---
+[[artur.endpoints.steps]]
+id = "enrich"                       # unique step id (required)
+type = "task"                       # task | store.query | store.execute | http.request | respond (required)
+task = "echo"                       # references a [[artur.tasks]] name
+depends_on = []                     # IDs of steps that must complete first; default: []
+continue_on_error = false           # keep going if this step fails; default: false
+
+# --- Step: query a store ---
+# [[artur.endpoints.steps]]
+# id = "lookup"
+# type = "store.query"
+# store = "main"                    # references a [stores.<id>]
+# sql = "SELECT id, name FROM items WHERE category = ?1"
+# params = ["{{query.category}}"]   # bind parameters; supports templates
+
+# --- Step: execute a statement on a store ---
+# [[artur.endpoints.steps]]
+# id = "insert"
+# type = "store.execute"
+# store = "main"
+# sql = "INSERT INTO items (name) VALUES (?1)"
+# params = ["{{body_json.name}}"]
+
+# --- Step: make an outgoing HTTP request ---
+# [[artur.endpoints.steps]]
+# id = "fetch"
+# type = "http.request"
+# transport = "ladon"               # references a [transports.http.<id>]
+# url = "/jobs"                     # path appended to transport base_url; supports templates
+# method = "GET"                    # GET (default) | POST | PUT | PATCH | DELETE
+# timeout_ms = 5000                 # per-step timeout; falls back to transport timeout_ms
+# [artur.endpoints.steps.headers]   # per-request headers; supports templates
+# authorization = "Bearer {{header.authorization}}"
+# body = { key = "{{param.id}}" }  # JSON request body; supports templates; null = no body
+
+# --- Step: return a value (terminates response composition) ---
+# [[artur.endpoints.steps]]
+# id = "reply"
+# type = "respond"
+# value = { ok = true, data = "{{steps.lookup.rows}}" }  # default: null
+
+
+# =============================================================================
+#  ENDPOINT SECURITY
+# =============================================================================
+# Any endpoint may include a [artur.endpoints.security] block with one or
+# more of the guards below.  All configured guards must pass for the request
+# to be accepted.
+
+# [[artur.endpoints]]
+# name = "secure_endpoint"
+# method = "POST"
+# path = "/v1/secure"
+# action = "task.run"
+# task = "echo"
+#
+# [artur.endpoints.security]
+#
+# # --- API key verification ---
+# [artur.endpoints.security.api_key]
+# header = "authorization"          # header to check; default: "authorization"
+# value = "{{env.ARTUR_API_KEY}}"   # expected key value; supports templates (required)
+# scheme = "Bearer"                 # optional scheme prefix prepended before comparison
+#
+# # --- Challenge verification (e.g. ALTCHA PoW) ---
+# [artur.endpoints.security.challenge]
+# task = "verify_challenge"         # task that validates the challenge (required)
+# success_path = "ok"               # JSON path to a boolean in task output;
+#                                   # when unset checks "ok", "allowed", or "verified"
+#
+# # --- X402 / payment verification ---
+# [artur.endpoints.security.x402]
+# task = "check_payment"            # task that checks payment (required)
+# success_path = "paid"             # JSON path to a boolean in task output;
+#                                   # when unset checks "ok", "allowed", "verified", or "paid"
+#
+# # --- Failure-based blocking ---
+# [artur.endpoints.security.failure_block]
+# key = "{{header.authorization}}"  # template to derive the blocking key; default: "{{header.authorization}}"
+# max_failures = 5                  # failures within the window before block; default: 5
+# window_secs = 300                 # rolling failure window in seconds; default: 300
+# block_secs = 900                  # block duration after threshold exceeded; default: 900
+
+
+# =============================================================================
+#  TEMPLATE REFERENCE
+# =============================================================================
+# Most string values (args, env vars, headers, bodies, SQL, URLs, etc.)
+# support the following template placeholders:
+#
+#   {{method}}              — HTTP method (e.g. "POST")
+#   {{uri}}                 — full request URI including query string
+#   {{path}}                — request path without query string
+#   {{body}}                — raw request body as text
+#   {{request}}             — full request context as compact JSON (alias: {{request_json}})
+#   {{body_json}}           — parsed request body as a JSON value (if valid JSON)
+#   {{param.<name>}}        — URL path parameter (e.g. {name} or :name)
+#   {{query.<name>}}        — query-string parameter
+#   {{header.<name>}}       — request header value (lowercased name)
+#   {{env.<NAME>}}          — environment variable from the Artur process
+#   {{body_json.<path>}}    — field inside a JSON body, dot-separated (e.g. .items.0.name)
+#   {{steps.<id>.<path>}}   — output from a previously executed workflow step
+#   {{step.<id>.<path>}}    — alias for {{steps.<id>.<path>}}
