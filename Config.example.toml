@@ -127,7 +127,7 @@ name = "echo"                       # unique name (required)
 mode = "sync"                       # "sync" (block) or "async" (return job_id); default: "sync"
 command = "python3"                 # executable (required)
 args = [                            # command-line arguments; supports templates
-    "scripts/echo.py",
+    "examples/scripts/echo.py",
     "--name", "{{param.name}}",
     "--source", "{{query.source}}",
 ]
@@ -157,7 +157,7 @@ type = "request_json"
 name = "long_job"
 mode = "async"
 command = "python3"
-args = ["scripts/long_job.py"]
+args = ["examples/scripts/long_task.py"]
 timeout_ms = 120000
 stdout_format = "json"
 
@@ -211,7 +211,7 @@ action = "job.get"
 [[artur.endpoints]]
 name = "compose"
 method = "POST"
-path = "/v1/compose"
+path = "/v1/compose/{name}"
 action = "workflow.run"
 
 # Workflow result configuration.
@@ -222,7 +222,7 @@ status = 200                        # HTTP status code; default: 200
 #   or an empty object if there is no respond step.
 #   When set explicitly, include_steps controls whether step outputs
 #   are merged in.
-body = { ok = true, result = "{{steps.fetch.data}}" }
+body = { ok = true, echo_name = "{{steps.enrich.json.name}}", echo_source = "{{steps.enrich.json.source}}" }
 # [artur.endpoints.result.headers]
 # x-custom = "value"
 include_steps = false               # include step outputs in response; default: true
