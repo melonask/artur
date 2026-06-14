@@ -4,9 +4,11 @@ use crate::{
     config::{EndpointAction, EndpointConfig, HttpMethod},
     error::{ArturError, Result},
     process::{
-        JobRecord, JobStore, ProcessRunResponse, RequestContext, hashmap_to_btree,
+        JobRecord, JobStore, RequestContext, TaskRunResponse, hashmap_to_btree,
         header_map_to_btree, run_or_enqueue,
     },
+    security::{SecurityState, authorize_endpoint},
+    workflow::run_workflow,
 };
 use axum::{
     Json, Router,
@@ -16,15 +18,17 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
+use serde_json::Value;
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub config: Arc<AppConfig>,
     pub jobs: JobStore,
+    pub security: SecurityState,
 }
 
-struct ProcessEndpointRequest {
+struct EndpointRequest {
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -38,14 +42,17 @@ pub async fn build_router(config: AppConfig) -> Result<Router> {
     let state = AppState {
         config: Arc::new(config.clone()),
         jobs: JobStore::default(),
+        security: SecurityState::default(),
     };
 
     let mut router = Router::new().route("/healthz", get(health));
-    for endpoint in config.endpoints.clone() {
+    for endpoint in config.artur.endpoints.clone() {
         router = register_endpoint(router, endpoint)?;
     }
 
-    let router = router.layer(DefaultBodyLimit::max(config.server.body_limit_bytes));
+    let router = router.layer(DefaultBodyLimit::max(
+        config.server_config().body_limit_bytes,
+    ));
     Ok(router.with_state(state))
 }
 
@@ -70,12 +77,14 @@ fn register_endpoint(
                         handle_configured_endpoint(
                             state,
                             endpoint_for_handler.clone(),
-                            method,
-                            uri,
-                            headers,
-                            query,
-                            params,
-                            body,
+                            EndpointRequest {
+                                method,
+                                uri: uri.0,
+                                headers,
+                                query: query.0,
+                                params,
+                                body,
+                            },
                         )
                     },
                 ),
@@ -96,12 +105,14 @@ fn register_endpoint(
                         handle_configured_endpoint(
                             state,
                             endpoint_for_handler.clone(),
-                            method,
-                            uri,
-                            headers,
-                            query,
-                            params,
-                            body,
+                            EndpointRequest {
+                                method,
+                                uri: uri.0,
+                                headers,
+                                query: query.0,
+                                params,
+                                body,
+                            },
                         )
                     },
                 ),
@@ -122,12 +133,14 @@ fn register_endpoint(
                         handle_configured_endpoint(
                             state,
                             endpoint_for_handler.clone(),
-                            method,
-                            uri,
-                            headers,
-                            query,
-                            params,
-                            body,
+                            EndpointRequest {
+                                method,
+                                uri: uri.0,
+                                headers,
+                                query: query.0,
+                                params,
+                                body,
+                            },
                         )
                     },
                 ),
@@ -148,12 +161,14 @@ fn register_endpoint(
                         handle_configured_endpoint(
                             state,
                             endpoint_for_handler.clone(),
-                            method,
-                            uri,
-                            headers,
-                            query,
-                            params,
-                            body,
+                            EndpointRequest {
+                                method,
+                                uri: uri.0,
+                                headers,
+                                query: query.0,
+                                params,
+                                body,
+                            },
                         )
                     },
                 ),
@@ -174,12 +189,14 @@ fn register_endpoint(
                         handle_configured_endpoint(
                             state,
                             endpoint_for_handler.clone(),
-                            method,
-                            uri,
-                            headers,
-                            query,
-                            params,
-                            body,
+                            EndpointRequest {
+                                method,
+                                uri: uri.0,
+                                headers,
+                                query: query.0,
+                                params,
+                                body,
+                            },
                         )
                     },
                 ),
@@ -196,34 +213,46 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_configured_endpoint(
     State(state): State<AppState>,
     endpoint: EndpointConfig,
-    method: Method,
-    OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
-    Query(query): Query<HashMap<String, String>>,
-    params: Option<Path<HashMap<String, String>>>,
-    body: Bytes,
+    request_parts: EndpointRequest,
 ) -> Result<Response> {
+    if let Some(limit) = endpoint.body_limit_bytes
+        && request_parts.body.len() > limit
+    {
+        return Err(ArturError::PayloadTooLarge(format!(
+            "endpoint {} body exceeded {} bytes",
+            endpoint.name, limit
+        )));
+    }
+
+    let params = request_parts
+        .params
+        .map(|Path(params)| params)
+        .unwrap_or_default();
+    let request = RequestContext::from_parts(
+        request_parts.method.to_string(),
+        request_parts.uri.to_string(),
+        request_parts.uri.path().to_string(),
+        hashmap_to_btree(params.clone()),
+        hashmap_to_btree(request_parts.query),
+        header_map_to_btree(&request_parts.headers),
+        request_parts.body,
+    );
+
+    authorize_endpoint(
+        state.config.clone(),
+        state.security.clone(),
+        &endpoint,
+        &request,
+    )
+    .await?;
+
     match endpoint.action {
         EndpointAction::RespondStatic => respond_static(endpoint),
-        EndpointAction::ProcessRun => {
-            run_process_endpoint(
-                state,
-                endpoint,
-                ProcessEndpointRequest {
-                    method,
-                    uri,
-                    headers,
-                    query,
-                    params,
-                    body,
-                },
-            )
-            .await
-        }
+        EndpointAction::TaskRun => run_task_endpoint(state, endpoint, request).await,
+        EndpointAction::WorkflowRun => run_workflow_endpoint(state, endpoint, request).await,
         EndpointAction::JobGet => get_job_by_path(state, params).await,
     }
 }
@@ -235,67 +264,52 @@ fn respond_static(endpoint: EndpointConfig) -> Result<Response> {
             endpoint.name
         ))
     })?;
-    let status = StatusCode::from_u16(response_cfg.status).map_err(|err| {
-        ArturError::Config(format!(
-            "endpoint {} has invalid response status {}: {err}",
-            endpoint.name, response_cfg.status
-        ))
-    })?;
-    let mut response = (status, Json(response_cfg.body)).into_response();
-    for (name, value) in response_cfg.headers {
-        let name = HeaderName::from_bytes(name.as_bytes()).map_err(|err| {
-            ArturError::Config(format!(
-                "endpoint {} has invalid response header name {name}: {err}",
-                endpoint.name
-            ))
-        })?;
-        let value = HeaderValue::from_str(&value).map_err(|err| {
-            ArturError::Config(format!(
-                "endpoint {} has invalid response header value for {name}: {err}",
-                endpoint.name
-            ))
-        })?;
-        response.headers_mut().insert(name, value);
-    }
-    Ok(response)
+    respond_json(
+        response_cfg.status,
+        response_cfg.body,
+        response_cfg.headers,
+        &endpoint.name,
+    )
 }
 
-async fn run_process_endpoint(
+async fn run_task_endpoint(
     state: AppState,
     endpoint: EndpointConfig,
-    request_parts: ProcessEndpointRequest,
+    request: RequestContext,
 ) -> Result<Response> {
-    let process_name = endpoint
-        .process
-        .ok_or_else(|| ArturError::Config("process.run endpoint is missing process".to_string()))?;
-    let process = state
+    let task_name = endpoint
+        .task
+        .ok_or_else(|| ArturError::Config("task.run endpoint is missing task".to_string()))?;
+    let task = state
         .config
-        .process_by_name(&process_name)
+        .task_by_name(&task_name)
         .cloned()
-        .ok_or_else(|| ArturError::Config(format!("process {process_name} is not configured")))?;
+        .ok_or_else(|| ArturError::Config(format!("task {task_name} is not configured")))?;
 
-    let params = request_parts
-        .params
-        .map(|Path(params)| params)
-        .unwrap_or_default();
-    let request = RequestContext::from_parts(
-        request_parts.method.to_string(),
-        request_parts.uri.to_string(),
-        request_parts.uri.path().to_string(),
-        hashmap_to_btree(params),
-        hashmap_to_btree(request_parts.query),
-        header_map_to_btree(&request_parts.headers),
-        request_parts.body,
-    );
-    let output: ProcessRunResponse = run_or_enqueue(process, request, state.jobs.clone()).await?;
+    let output: TaskRunResponse = run_or_enqueue(task, request, state.jobs.clone()).await?;
     Ok(Json(output).into_response())
 }
 
-async fn get_job_by_path(
+async fn run_workflow_endpoint(
     state: AppState,
-    params: Option<Path<HashMap<String, String>>>,
+    endpoint: EndpointConfig,
+    request: RequestContext,
 ) -> Result<Response> {
-    let params = params.map(|Path(params)| params).unwrap_or_default();
+    let output = run_workflow(state.config.clone(), endpoint.clone(), request).await?;
+    let body = if endpoint.result.body.is_null() || endpoint.result.include_steps {
+        serde_json::to_value(output)?
+    } else {
+        output.result
+    };
+    respond_json(
+        endpoint.result.status,
+        body,
+        endpoint.result.headers,
+        &endpoint.name,
+    )
+}
+
+async fn get_job_by_path(state: AppState, params: HashMap<String, String>) -> Result<Response> {
     let job_id = params
         .get("job_id")
         .ok_or_else(|| ArturError::Request("missing job_id path parameter".to_string()))?;
@@ -306,6 +320,37 @@ async fn get_job_by_path(
         .ok_or_else(|| ArturError::NotFound(format!("job {job_id} not found")))?;
     Ok(Json(job).into_response())
 }
+
+fn respond_json(
+    status: u16,
+    body: Value,
+    headers: HashMapLike,
+    endpoint_name: &str,
+) -> Result<Response> {
+    let status = StatusCode::from_u16(status).map_err(|err| {
+        ArturError::Config(format!(
+            "endpoint {endpoint_name} has invalid response status: {err}"
+        ))
+    })?;
+    let mut response = (status, Json(body)).into_response();
+    for (name, value) in headers {
+        let name_for_error = name.clone();
+        let name = HeaderName::from_bytes(name.as_bytes()).map_err(|err| {
+            ArturError::Config(format!(
+                "endpoint {endpoint_name} has invalid response header name {name_for_error}: {err}"
+            ))
+        })?;
+        let value = HeaderValue::from_str(&value).map_err(|err| {
+            ArturError::Config(format!(
+                "endpoint {endpoint_name} has invalid response header value for {name}: {err}"
+            ))
+        })?;
+        response.headers_mut().insert(name, value);
+    }
+    Ok(response)
+}
+
+type HashMapLike = std::collections::BTreeMap<String, String>;
 
 fn normalize_axum_path(path: &str) -> String {
     // `:name` was common in older routers. Axum 0.8 uses `{name}`.

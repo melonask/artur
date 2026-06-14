@@ -35,18 +35,18 @@ For Docker-based development, ensure the configuration binds to `0.0.0.0` inside
 ```toml
 version = 1
 
-[server]
+[artur.server]
 bind = "127.0.0.1"
 port = 46796
 
-[[endpoints]]
+[[artur.endpoints]]
 name = "create_challenge"
 method = "POST"
 path = "/v1/challenge"
-action = "process.run"
-process = "challenge_create"
+action = "task.run"
+task = "challenge_create"
 
-[[processes]]
+[[artur.tasks]]
 name = "challenge_create"
 mode = "sync"
 command = "challenge"
@@ -67,14 +67,14 @@ This example assumes there is a `challenge` executable in `PATH`. If your challe
 ## Example: create a space
 
 ```toml
-[[endpoints]]
+[[artur.endpoints]]
 name = "create_space"
 method = "POST"
 path = "/v1/space"
-action = "process.run"
-process = "space_create"
+action = "task.run"
+task = "space_create"
 
-[[processes]]
+[[artur.tasks]]
 name = "space_create"
 mode = "sync"
 command = "python3"
@@ -82,7 +82,7 @@ args = ["examples/scripts/space_create.py"]
 timeout_ms = 30000
 stdout_format = "json"
 
-[processes.stdin]
+[artur.tasks.stdin]
 type = "body"
 ```
 
@@ -136,12 +136,12 @@ curl -sS http://127.0.0.1:46796/v1/space/ -H 'sid: 012345678901234567890123'
 
 ## Recommended architecture
 
-Use Artur as the HTTP adapter and process orchestrator:
+Use Artur as the HTTP adapter and task orchestrator:
 
 ```text
 HTTP request
   -> artur route from TOML
-    -> configured process
+    -> configured task
       -> your domain code
         -> database / queue / service / chain tooling
       <- JSON result or job ID

@@ -1,0 +1,21 @@
+services:
+  artur:
+    build: .
+    image: artur:local
+    command: ["artur", "--config", "/etc/melonask/Config.toml"]
+    environment:
+      ARTUR_CONFIG: /etc/melonask/Config.toml
+      ARTUR_LEDGER_DB: /app/data/artur/service.sqlite3
+    ports:
+      - "46796:46796"
+    volumes:
+      - ./examples/service.toml:/etc/melonask/Config.toml:ro
+      - artur-data:/app/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:46796/healthz', timeout=2).read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  artur-data:

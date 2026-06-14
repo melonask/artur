@@ -1,5 +1,5 @@
 use crate::{
-    config::{ProcessConfig, ProcessMode, ProcessOutputFormat, ProcessStdin},
+    config::{TaskConfig, TaskMode, TaskOutputFormat, TaskStdin},
     error::{ArturError, Result},
 };
 use bytes::Bytes;
@@ -24,6 +24,7 @@ pub struct RequestContext {
     pub headers: BTreeMap<String, String>,
     pub body: String,
     pub body_json: Option<Value>,
+    pub steps: BTreeMap<String, Value>,
 }
 
 impl RequestContext {
@@ -47,6 +48,7 @@ impl RequestContext {
             headers,
             body,
             body_json,
+            steps: BTreeMap::new(),
         }
     }
 
@@ -60,7 +62,14 @@ impl RequestContext {
             "headers": self.headers.clone(),
             "body": self.body.clone(),
             "body_json": self.body_json.clone(),
+            "steps": self.steps.clone(),
         })
+    }
+
+    pub fn with_steps(&self, steps: BTreeMap<String, Value>) -> Self {
+        let mut cloned = self.clone();
+        cloned.steps = steps;
+        cloned
     }
 }
 
@@ -73,8 +82,8 @@ pub struct JobStore {
 pub struct JobRecord {
     pub id: String,
     pub status: JobStatus,
-    pub process: String,
-    pub result: Option<ProcessOutput>,
+    pub task: String,
+    pub result: Option<TaskOutput>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -86,22 +95,28 @@ pub enum JobStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ProcessOutput {
+pub struct TaskOutput {
     pub ok: bool,
-    pub process: String,
+    pub task: String,
     pub status_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
     pub timed_out: bool,
     pub duration_ms: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub json_parse_error: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stdout_truncated: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stderr_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub json: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
-pub enum ProcessRunResponse {
-    Immediate(ProcessOutput),
+pub enum TaskRunResponse {
+    Immediate(TaskOutput),
     Accepted { job_id: String, status: JobStatus },
 }
 
@@ -110,19 +125,19 @@ impl JobStore {
         self.jobs.read().await.get(id).cloned()
     }
 
-    async fn insert_running(&self, id: String, process: String) {
+    async fn insert_running(&self, id: String, task: String) {
         self.jobs.write().await.insert(
             id.clone(),
             JobRecord {
                 id,
                 status: JobStatus::Running,
-                process,
+                task,
                 result: None,
             },
         );
     }
 
-    async fn finish(&self, id: &str, result: Result<ProcessOutput>) {
+    async fn finish(&self, id: &str, result: Result<TaskOutput>) {
         let mut jobs = self.jobs.write().await;
         if let Some(record) = jobs.get_mut(id) {
             match result {
@@ -136,14 +151,17 @@ impl JobStore {
                 }
                 Err(err) => {
                     record.status = JobStatus::Failed;
-                    record.result = Some(ProcessOutput {
+                    record.result = Some(TaskOutput {
                         ok: false,
-                        process: record.process.clone(),
+                        task: record.task.clone(),
                         status_code: None,
                         stdout: String::new(),
                         stderr: err.to_string(),
                         timed_out: false,
                         duration_ms: 0,
+                        json_parse_error: None,
+                        stdout_truncated: false,
+                        stderr_truncated: false,
                         json: None,
                     });
                 }
@@ -153,15 +171,13 @@ impl JobStore {
 }
 
 pub async fn run_or_enqueue(
-    cfg: ProcessConfig,
+    cfg: TaskConfig,
     request: RequestContext,
     jobs: JobStore,
-) -> Result<ProcessRunResponse> {
+) -> Result<TaskRunResponse> {
     match cfg.mode {
-        ProcessMode::Sync => Ok(ProcessRunResponse::Immediate(
-            run_process(&cfg, &request).await?,
-        )),
-        ProcessMode::Async => {
+        TaskMode::Sync => Ok(TaskRunResponse::Immediate(run_task(&cfg, &request).await?)),
+        TaskMode::Async => {
             let job_id = Uuid::new_v4().to_string();
             jobs.insert_running(job_id.clone(), cfg.name.clone()).await;
             let jobs_for_task = jobs.clone();
@@ -169,10 +185,10 @@ pub async fn run_or_enqueue(
             let request_for_task = request.clone();
             let job_id_for_task = job_id.clone();
             tokio::spawn(async move {
-                let result = run_process(&cfg_for_task, &request_for_task).await;
+                let result = run_task(&cfg_for_task, &request_for_task).await;
                 jobs_for_task.finish(&job_id_for_task, result).await;
             });
-            Ok(ProcessRunResponse::Accepted {
+            Ok(TaskRunResponse::Accepted {
                 job_id,
                 status: JobStatus::Running,
             })
@@ -180,7 +196,7 @@ pub async fn run_or_enqueue(
     }
 }
 
-pub async fn run_process(cfg: &ProcessConfig, request: &RequestContext) -> Result<ProcessOutput> {
+pub async fn run_task(cfg: &TaskConfig, request: &RequestContext) -> Result<TaskOutput> {
     let started = Instant::now();
     let args: Vec<String> = cfg
         .args
@@ -190,6 +206,9 @@ pub async fn run_process(cfg: &ProcessConfig, request: &RequestContext) -> Resul
 
     let mut command = Command::new(&cfg.command);
     command.kill_on_drop(true);
+    if !cfg.inherit_env {
+        command.env_clear();
+    }
     command.args(args);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -220,21 +239,37 @@ pub async fn run_process(cfg: &ProcessConfig, request: &RequestContext) -> Resul
 
     match output_result {
         Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let (stdout, stdout_truncated) =
+                bytes_to_limited_string(&output.stdout, cfg.max_stdout_bytes);
+            let (stderr, stderr_truncated) =
+                bytes_to_limited_string(&output.stderr, cfg.max_stderr_bytes);
+            let mut json_parse_error = None;
             let json = match cfg.stdout_format {
-                ProcessOutputFormat::Text => None,
-                ProcessOutputFormat::Json => serde_json::from_str(&stdout).ok(),
+                TaskOutputFormat::Text => None,
+                TaskOutputFormat::Json => match serde_json::from_str(&stdout) {
+                    Ok(value) => Some(value),
+                    Err(err) => {
+                        json_parse_error = Some(err.to_string());
+                        None
+                    }
+                },
             };
             let status_code = output.status.code();
-            Ok(ProcessOutput {
-                ok: status_code == Some(0),
-                process: cfg.name.clone(),
+            let exit_ok = status_code
+                .map(|code| cfg.success_exit_codes.contains(&code))
+                .unwrap_or(false);
+            let json_ok = cfg.stdout_format != TaskOutputFormat::Json || json_parse_error.is_none();
+            Ok(TaskOutput {
+                ok: exit_ok && json_ok,
+                task: cfg.name.clone(),
                 status_code,
                 stdout,
                 stderr,
                 timed_out: false,
                 duration_ms: started.elapsed().as_millis(),
+                json_parse_error,
+                stdout_truncated,
+                stderr_truncated,
                 json,
             })
         }
@@ -242,25 +277,38 @@ pub async fn run_process(cfg: &ProcessConfig, request: &RequestContext) -> Resul
             "failed to run process {}: {err}",
             cfg.name
         ))),
-        Err(_) => Ok(ProcessOutput {
+        Err(_) => Ok(TaskOutput {
             ok: false,
-            process: cfg.name.clone(),
+            task: cfg.name.clone(),
             status_code: None,
             stdout: String::new(),
             stderr: format!("process timed out after {} ms", cfg.timeout_ms),
             timed_out: true,
             duration_ms: started.elapsed().as_millis(),
+            json_parse_error: None,
+            stdout_truncated: false,
+            stderr_truncated: false,
             json: None,
         }),
     }
 }
 
-fn render_stdin(cfg: &ProcessStdin, request: &RequestContext) -> Result<Option<String>> {
+fn bytes_to_limited_string(bytes: &[u8], limit: usize) -> (String, bool) {
+    let truncated = bytes.len() > limit;
+    let visible = if truncated { &bytes[..limit] } else { bytes };
+    (String::from_utf8_lossy(visible).to_string(), truncated)
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn render_stdin(cfg: &TaskStdin, request: &RequestContext) -> Result<Option<String>> {
     match cfg {
-        ProcessStdin::None => Ok(None),
-        ProcessStdin::Body => Ok(Some(request.body.clone())),
-        ProcessStdin::RequestJson => Ok(Some(serde_json::to_string(&request.request_json())?)),
-        ProcessStdin::Template { template } => Ok(Some(render_template(template, request)?)),
+        TaskStdin::None => Ok(None),
+        TaskStdin::Body => Ok(Some(request.body.clone())),
+        TaskStdin::RequestJson => Ok(Some(serde_json::to_string(&request.request_json())?)),
+        TaskStdin::Template { template } => Ok(Some(render_template(template, request)?)),
     }
 }
 
@@ -283,23 +331,62 @@ pub fn render_template(template: &str, request: &RequestContext) -> Result<Strin
     Ok(rendered)
 }
 
-fn lookup_template_value(key: &str, request: &RequestContext) -> String {
+pub fn lookup_template_value(key: &str, request: &RequestContext) -> String {
+    lookup_template_json_value(key, request)
+        .map(|value| json_scalar_to_string(&value))
+        .unwrap_or_default()
+}
+
+pub fn lookup_template_json_value(key: &str, request: &RequestContext) -> Option<Value> {
     match key {
-        "method" => request.method.clone(),
-        "uri" => request.uri.clone(),
-        "path" => request.path.clone(),
-        "body" => request.body.clone(),
-        "request" | "request_json" => request.request_json().to_string(),
-        _ if key.starts_with("param.") => lookup_map(&request.params, &key[6..]),
-        _ if key.starts_with("query.") => lookup_map(&request.query, &key[6..]),
-        _ if key.starts_with("header.") => {
-            lookup_map(&request.headers, &key[7..].to_ascii_lowercase())
+        "method" => Some(Value::String(request.method.clone())),
+        "uri" => Some(Value::String(request.uri.clone())),
+        "path" => Some(Value::String(request.path.clone())),
+        "body" => Some(Value::String(request.body.clone())),
+        "request" | "request_json" => Some(request.request_json()),
+        "body_json" => request.body_json.clone(),
+        "steps" => Some(Value::Object(
+            request
+                .steps
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<Map<String, Value>>(),
+        )),
+        _ if key.starts_with("param.") => {
+            Some(Value::String(lookup_map(&request.params, &key[6..])))
         }
-        _ if key.starts_with("env.") => std::env::var(&key[4..]).unwrap_or_default(),
+        _ if key.starts_with("query.") => {
+            Some(Value::String(lookup_map(&request.query, &key[6..])))
+        }
+        _ if key.starts_with("header.") => Some(Value::String(lookup_map(
+            &request.headers,
+            &key[7..].to_ascii_lowercase(),
+        ))),
+        _ if key.starts_with("env.") => std::env::var(&key[4..]).ok().map(Value::String),
         _ if key.starts_with("body_json.") => {
-            lookup_json_path(request.body_json.as_ref(), &key[10..])
+            lookup_json_path_value(request.body_json.as_ref(), &key[10..])
         }
-        _ => String::new(),
+        _ if key.starts_with("steps.") => {
+            let steps = Value::Object(
+                request
+                    .steps
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<Map<String, Value>>(),
+            );
+            lookup_json_path_value(Some(&steps), &key[6..])
+        }
+        _ if key.starts_with("step.") => {
+            let steps = Value::Object(
+                request
+                    .steps
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<Map<String, Value>>(),
+            );
+            lookup_json_path_value(Some(&steps), &key[5..])
+        }
+        _ => None,
     }
 }
 
@@ -307,31 +394,58 @@ fn lookup_map(map: &BTreeMap<String, String>, key: &str) -> String {
     map.get(key).cloned().unwrap_or_default()
 }
 
-fn lookup_json_path(value: Option<&Value>, path: &str) -> String {
-    let Some(mut value) = value else {
-        return String::new();
-    };
+fn lookup_json_path_value(value: Option<&Value>, path: &str) -> Option<Value> {
+    let mut value = value?;
+    if path.trim().is_empty() {
+        return Some(value.clone());
+    }
     for part in path.split('.') {
         match value {
             Value::Object(map) => {
-                let Some(next) = map.get(part) else {
-                    return String::new();
-                };
-                value = next;
+                value = map.get(part)?;
             }
             Value::Array(items) => {
-                let Ok(index) = part.parse::<usize>() else {
-                    return String::new();
-                };
-                let Some(next) = items.get(index) else {
-                    return String::new();
-                };
-                value = next;
+                value = items.get(part.parse::<usize>().ok()?)?;
             }
-            _ => return String::new(),
+            _ => return None,
         }
     }
-    json_scalar_to_string(value)
+    Some(value.clone())
+}
+
+pub fn render_json_value(value: &Value, request: &RequestContext) -> Result<Value> {
+    match value {
+        Value::String(template) => {
+            if let Some(key) = whole_template_key(template)
+                && let Some(value) = lookup_template_json_value(key, request)
+            {
+                return Ok(value);
+            }
+            Ok(Value::String(render_template(template, request)?))
+        }
+        Value::Array(items) => items
+            .iter()
+            .map(|item| render_json_value(item, request))
+            .collect::<Result<Vec<_>>>()
+            .map(Value::Array),
+        Value::Object(map) => map
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), render_json_value(value, request)?)))
+            .collect::<Result<Map<String, Value>>>()
+            .map(Value::Object),
+        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(value.clone()),
+    }
+}
+
+fn whole_template_key(template: &str) -> Option<&str> {
+    let trimmed = template.trim();
+    if trimmed.starts_with("{{") && trimmed.ends_with("}}") {
+        let key = trimmed[2..trimmed.len() - 2].trim();
+        if !key.contains("{{") && !key.contains("}}") {
+            return Some(key);
+        }
+    }
+    None
 }
 
 fn json_scalar_to_string(value: &Value) -> String {
@@ -381,6 +495,10 @@ mod tests {
             headers: BTreeMap::from([("authorization".to_string(), "Bearer token".to_string())]),
             body: r#"{"name":"Ada","items":["a","b"]}"#.to_string(),
             body_json: Some(serde_json::json!({ "name": "Ada", "items": ["a", "b"] })),
+            steps: BTreeMap::from([(
+                "sid".to_string(),
+                serde_json::json!({ "json": { "sid": "123" } }),
+            )]),
         }
     }
 
@@ -397,5 +515,19 @@ mod tests {
     #[test]
     fn leaves_unknown_template_as_empty() {
         assert_eq!(render_template("x{{missing}}y", &context()).unwrap(), "xy");
+    }
+
+    #[test]
+    fn renders_json_values_without_stringifying_whole_templates() {
+        let rendered = render_json_value(
+            &serde_json::json!({
+                "sid": "{{steps.sid.json.sid}}",
+                "request": "{{request_json}}"
+            }),
+            &context(),
+        )
+        .unwrap();
+        assert_eq!(rendered["sid"], "123");
+        assert_eq!(rendered["request"]["method"], "POST");
     }
 }

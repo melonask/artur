@@ -1,0 +1,196 @@
+# Ready-to-use single shared configuration for Artur plus sibling packages.
+version = 1
+
+[log]
+level = "info"
+format = "json"
+
+[runtime]
+max_payload_bytes = 1048576
+shutdown_timeout_secs = 30
+
+[http]
+bind = "0.0.0.0"
+port = 46796
+prefix = "v1"
+
+[stores.artur]
+driver = "sqlite"
+url = "sqlite://data/artur/service.sqlite3"
+migrate = true
+
+[stores.bria]
+driver = "sqlite"
+url = "sqlite://data/bria/bria-state.db"
+migrate = true
+
+[stores.ladon]
+driver = "sqlite"
+url = "sqlite://data/ladon/addresses.db"
+migrate = true
+
+[stores.pano]
+driver = "sqlite"
+url = "sqlite://data/pano/events.db"
+migrate = true
+
+[stores.oracles]
+driver = "sqlite"
+url = "sqlite://data/oracles/rates.db"
+migrate = true
+
+[transports.http.bria]
+base_url = "http://bria:4000/v1"
+timeout_ms = 30000
+
+[transports.http.ladon]
+base_url = "http://ladon:4010/v1"
+timeout_ms = 10000
+
+[transports.http.oracles]
+base_url = "http://oracles:4030/v1"
+timeout_ms = 10000
+
+[transports.http.pano]
+base_url = "http://pano:4020/v1"
+timeout_ms = 10000
+
+[bria.global.state]
+backend = "sqlite"
+store = "bria"
+
+[ladon]
+store = "ladon"
+
+[pano]
+store = "pano"
+
+[oracles]
+store = "oracles"
+
+[artur.server]
+bind = "0.0.0.0"
+port = 46796
+body_limit_bytes = 1048576
+
+[[artur.endpoints]]
+name = "service_health"
+method = "GET"
+path = "/v1/health"
+action = "respond.static"
+
+[artur.endpoints.response]
+body = { ok = true, service = "artur-paid-jobs" }
+
+[[artur.endpoints]]
+name = "create_space"
+method = "POST"
+path = "/v1/spaces"
+action = "task.run"
+task = "create_space"
+body_limit_bytes = 65536
+
+[[artur.endpoints]]
+name = "space_balances"
+method = "GET"
+path = "/v1/spaces/{sid}/balances"
+action = "workflow.run"
+
+[artur.endpoints.result]
+include_steps = false
+body = { ok = true, sid = "{{param.sid}}", balances = "{{steps.balances.rows}}" }
+
+[[artur.endpoints.steps]]
+id = "balances"
+type = "store.query"
+store = "artur"
+sql = "SELECT chain, token, amount, updated_at FROM balances WHERE sid = ?1 ORDER BY chain, token"
+params = ["{{param.sid}}"]
+
+[[artur.endpoints]]
+name = "space_top_up"
+method = "POST"
+path = "/v1/spaces/{sid}/topups"
+action = "task.run"
+task = "top_up_space"
+body_limit_bytes = 65536
+
+[[artur.endpoints]]
+name = "run_immediate_job"
+method = "POST"
+path = "/v1/spaces/{sid}/jobs/immediate"
+action = "task.run"
+task = "run_paid_job"
+body_limit_bytes = 65536
+
+[artur.endpoints.security.x402]
+task = "authorize_paid_job"
+success_path = "paid"
+
+[[artur.endpoints]]
+name = "run_async_job"
+method = "POST"
+path = "/v1/spaces/{sid}/jobs/async"
+action = "task.run"
+task = "run_paid_job_async"
+body_limit_bytes = 65536
+
+[artur.endpoints.security.x402]
+task = "authorize_paid_job"
+success_path = "paid"
+
+[[artur.endpoints]]
+name = "get_job"
+method = "GET"
+path = "/v1/jobs/{job_id}"
+action = "job.get"
+
+[[artur.tasks]]
+name = "create_space"
+mode = "sync"
+command = "python3"
+args = ["examples/scripts/ledger.py", "create-space"]
+stdout_format = "json"
+
+[artur.tasks.stdin]
+type = "request_json"
+
+[[artur.tasks]]
+name = "top_up_space"
+mode = "sync"
+command = "python3"
+args = ["examples/scripts/ledger.py", "top-up"]
+stdout_format = "json"
+
+[artur.tasks.stdin]
+type = "request_json"
+
+[[artur.tasks]]
+name = "authorize_paid_job"
+mode = "sync"
+command = "python3"
+args = ["examples/scripts/ledger.py", "check-payment"]
+stdout_format = "json"
+
+[artur.tasks.stdin]
+type = "request_json"
+
+[[artur.tasks]]
+name = "run_paid_job"
+mode = "sync"
+command = "python3"
+args = ["examples/scripts/ledger.py", "run-job"]
+stdout_format = "json"
+
+[artur.tasks.stdin]
+type = "request_json"
+
+[[artur.tasks]]
+name = "run_paid_job_async"
+mode = "async"
+command = "python3"
+args = ["examples/scripts/ledger.py", "run-job"]
+stdout_format = "json"
+
+[artur.tasks.stdin]
+type = "request_json"

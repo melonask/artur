@@ -1,0 +1,53 @@
+# Example distributed deployment: every package receives the same Config.toml.
+# Artur is the public gateway; Ladon, Pano, Oracles, and Bria are internal services.
+services:
+  artur:
+    image: ghcr.io/melonask/artur:latest
+    command: ["artur", "--config", "/etc/melonask/Config.toml"]
+    ports:
+      - "46796:46796"
+    environment:
+      ARTUR_CONFIG: /etc/melonask/Config.toml
+      LADON_API_KEY: ${LADON_API_KEY:?set LADON_API_KEY}
+      PANO_API_KEY: ${PANO_API_KEY:?set PANO_API_KEY}
+      ORACLES_API_KEY: ${ORACLES_API_KEY:?set ORACLES_API_KEY}
+      BRIA_API_KEY: ${BRIA_API_KEY:?set BRIA_API_KEY}
+    volumes:
+      - ./universal-composition.toml:/etc/melonask/Config.toml:ro
+      - melonask-data:/app/data
+    depends_on:
+      - ladon
+      - pano
+      - oracles
+      - bria
+
+  ladon:
+    image: ghcr.io/melonask/ladon:latest
+    command: ["ladon", "--config", "/etc/melonask/Config.toml"]
+    volumes:
+      - ./universal-composition.toml:/etc/melonask/Config.toml:ro
+      - melonask-data:/app/data
+
+  pano:
+    image: ghcr.io/melonask/pano:latest
+    command: ["pano", "--config", "/etc/melonask/Config.toml"]
+    volumes:
+      - ./universal-composition.toml:/etc/melonask/Config.toml:ro
+      - melonask-data:/app/data
+
+  oracles:
+    image: ghcr.io/melonask/oracles:latest
+    command: ["oracles", "--config", "/etc/melonask/Config.toml"]
+    volumes:
+      - ./universal-composition.toml:/etc/melonask/Config.toml:ro
+      - melonask-data:/app/data
+
+  bria:
+    image: ghcr.io/melonask/bria:latest
+    command: ["bria", "--config", "/etc/melonask/Config.toml"]
+    volumes:
+      - ./universal-composition.toml:/etc/melonask/Config.toml:ro
+      - melonask-data:/app/data
+
+volumes:
+  melonask-data:

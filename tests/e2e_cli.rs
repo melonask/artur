@@ -137,29 +137,29 @@ console.log(JSON.stringify({runtime:'node', name:process.argv[1], source:request
         r#"
 version = 1
 
-[server]
+[artur.server]
 bind = "127.0.0.1"
 port = {port}
 body_limit_bytes = 1048576
 
-[[endpoints]]
+[[artur.endpoints]]
 name = "hello"
 method = "GET"
 path = "/v1/hello"
 action = "respond.static"
 
-[endpoints.response]
+[artur.endpoints.response]
 status = 200
 body = {{ ok = true, service = "artur-e2e" }}
 
-[[endpoints]]
+[[artur.endpoints]]
 name = "js"
 method = "POST"
 path = "/v1/process/js/{{name}}"
-action = "process.run"
-process = "js_helper"
+action = "task.run"
+task = "js_helper"
 
-[[processes]]
+[[artur.tasks]]
 name = "js_helper"
 mode = "sync"
 command = "node"
@@ -167,17 +167,17 @@ args = ["-e", "{js}", "{{{{param.name}}}}"]
 timeout_ms = 10000
 stdout_format = "json"
 
-[processes.stdin]
+[artur.tasks.stdin]
 type = "request_json"
 
-[[endpoints]]
+[[artur.endpoints]]
 name = "npx"
 method = "POST"
 path = "/v1/process/npx"
-action = "process.run"
-process = "npx_helper"
+action = "task.run"
+task = "npx_helper"
 
-[[processes]]
+[[artur.tasks]]
 name = "npx_helper"
 mode = "sync"
 command = "npx"
@@ -186,14 +186,14 @@ working_dir = "{npx_dir}"
 timeout_ms = 10000
 stdout_format = "json"
 
-[[endpoints]]
+[[artur.endpoints]]
 name = "rust"
 method = "POST"
 path = "/v1/process/rust/{{id}}"
-action = "process.run"
-process = "rust_helper"
+action = "task.run"
+task = "rust_helper"
 
-[[processes]]
+[[artur.tasks]]
 name = "rust_helper"
 mode = "sync"
 command = "{rust_helper}"
@@ -201,7 +201,7 @@ args = ["{{{{param.id}}}}"]
 timeout_ms = 10000
 stdout_format = "json"
 
-[processes.stdin]
+[artur.tasks.stdin]
 type = "body"
 "#,
         js = toml_escape(js),

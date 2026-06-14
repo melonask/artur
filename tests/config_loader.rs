@@ -9,13 +9,13 @@ async fn loads_config_from_file() {
         r#"
 version = 1
 
-[[endpoints]]
+[[artur.endpoints]]
 name = "hello"
 method = "GET"
 path = "/hello"
 action = "respond.static"
 
-[endpoints.response]
+[artur.endpoints.response]
 body = { ok = true }
 "#
         .as_bytes(),
@@ -23,6 +23,6 @@ body = { ok = true }
     .unwrap();
     let cfg = load_config(file.path().to_str().unwrap()).await.unwrap();
     assert_eq!(cfg.version, 1);
-    assert_eq!(cfg.server.port, 46796);
-    assert_eq!(cfg.endpoints[0].name, "hello");
+    assert_eq!(cfg.server_config().port, 46796);
+    assert_eq!(cfg.artur.endpoints[0].name, "hello");
 }

@@ -2,30 +2,30 @@
 # server is reachable through Docker port publishing.
 version = 1
 
-[server]
+[artur.server]
 bind = "0.0.0.0"
 port = 46796
 body_limit_bytes = 1048576
 
-[[endpoints]]
+[[artur.endpoints]]
 name = "hello"
 method = "GET"
 path = "/v1/hello"
 action = "respond.static"
 
-[endpoints.response]
+[artur.endpoints.response]
 status = 200
 body = { ok = true, service = "artur", runtime = "docker" }
 headers = { cache-control = "no-store" }
 
-[[endpoints]]
+[[artur.endpoints]]
 name = "echo"
 method = "POST"
 path = "/v1/process/echo/{name}"
-action = "process.run"
-process = "echo_json"
+action = "task.run"
+task = "echo_json"
 
-[[processes]]
+[[artur.tasks]]
 name = "echo_json"
 mode = "sync"
 command = "python3"
@@ -33,5 +33,5 @@ args = ["examples/scripts/echo.py", "--name", "{{param.name}}", "--source", "{{q
 timeout_ms = 30000
 stdout_format = "json"
 
-[processes.stdin]
+[artur.tasks.stdin]
 type = "request_json"

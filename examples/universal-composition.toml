@@ -1,0 +1,239 @@
+# A single universal Config.toml shared by artur, bria, ladon, oracles, and pano.
+# Each package reads its own namespace and shared profiles such as [stores.*].
+version = 1
+
+[log]
+level = "info"
+format = "json"
+
+[runtime]
+max_payload_bytes = 1048576
+shutdown_timeout_secs = 30
+
+[http]
+bind = "0.0.0.0"
+port = 46796
+prefix = "v1"
+
+[stores.artur]
+driver = "sqlite"
+url = "sqlite://data/artur/api.sqlite3"
+migrate = true
+
+[stores.bria]
+driver = "sqlite"
+url = "sqlite://data/bria/bria-state.db"
+migrate = true
+
+[stores.ladon]
+driver = "sqlite"
+url = "sqlite://data/ladon/addresses.db"
+migrate = true
+
+[stores.pano]
+driver = "sqlite"
+url = "sqlite://data/pano/events.db"
+migrate = true
+
+[stores.oracles]
+driver = "sqlite"
+url = "sqlite://data/oracles/rates.db"
+migrate = true
+
+
+[transports.http.ladon]
+base_url = "http://ladon:4010/v1"
+timeout_ms = 10000
+headers = { authorization = "Bearer {{env.LADON_API_KEY}}" }
+
+[transports.http.pano]
+base_url = "http://pano:4020/v1"
+timeout_ms = 10000
+headers = { authorization = "Bearer {{env.PANO_API_KEY}}" }
+
+[transports.http.oracles]
+base_url = "http://oracles:4030/v1"
+timeout_ms = 10000
+headers = { authorization = "Bearer {{env.ORACLES_API_KEY}}" }
+
+[transports.http.bria]
+base_url = "http://bria:4000/v1"
+timeout_ms = 30000
+headers = { authorization = "Bearer {{env.BRIA_API_KEY}}" }
+
+# ── Package namespaces read by their own binaries ────────────────────────────
+[ladon]
+store = "ladon"
+
+[ladon.table]
+name = "derived_addresses"
+
+[pano]
+store = "pano"
+
+[oracles]
+store = "oracles"
+
+[bria.global.state]
+backend = "sqlite"
+store = "bria"
+
+[bria.server]
+enabled = true
+bind = "0.0.0.0"
+port = 4000
+prefix = "v1"
+
+# ── Artur HTTP entrypoint ─────────────────────────────────────────────────────
+[artur.server]
+bind = "0.0.0.0"
+port = 46796
+body_limit_bytes = 1048576
+
+# POST /v1/spaces creates a sid, calls already-running Ladon/Pano/Oracles/Bria
+# services through shared [transports.http.*] profiles, stores the combined record,
+# then asks Bria to launch a paid background task.
+[[artur.endpoints]]
+name = "create_space"
+method = "POST"
+path = "/v1/spaces"
+action = "workflow.run"
+body_limit_bytes = 65536
+
+[artur.endpoints.security.failure_block]
+key = "{{header.authorization}}"
+max_failures = 5
+window_secs = 300
+block_secs = 900
+
+[artur.endpoints.security.challenge]
+task = "altcha_verify"
+success_path = "verified"
+
+[artur.endpoints.security.x402]
+task = "x402_verify"
+success_path = "paid"
+
+[artur.endpoints.result]
+include_steps = false
+body = { ok = true, sid = "{{steps.sid.json.sid}}", addresses = "{{steps.ladon_addresses.json.addresses}}", prices_usd = "{{steps.oracles_prices.json.prices}}", pano_event = "{{steps.pano_track.json.event_id}}", bria_job = "{{steps.bria_paid_task.json.job_id}}" }
+
+[[artur.endpoints.steps]]
+id = "schema"
+type = "store.execute"
+store = "artur"
+sql = "CREATE TABLE IF NOT EXISTS spaces (sid TEXT PRIMARY KEY, addresses_json TEXT NOT NULL, prices_json TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()))"
+
+[[artur.endpoints.steps]]
+id = "sid"
+type = "task"
+task = "sid_create"
+
+[[artur.endpoints.steps]]
+id = "ladon_addresses"
+type = "http.request"
+transport = "ladon"
+method = "POST"
+url = "/addresses/checkout"
+depends_on = ["sid"]
+body = { sid = "{{steps.sid.json.sid}}", chains = ["evm", "solana", "btc"], count = 1 }
+
+[[artur.endpoints.steps]]
+id = "pano_track"
+type = "http.request"
+transport = "pano"
+method = "POST"
+url = "/events"
+depends_on = ["sid", "ladon_addresses"]
+body = { subject_id = "{{steps.sid.json.sid}}", event_type = "space.created", payload = "{{steps.ladon_addresses.json}}" }
+
+[[artur.endpoints.steps]]
+id = "oracles_prices"
+type = "http.request"
+transport = "oracles"
+method = "POST"
+url = "/prices/usd"
+depends_on = ["ladon_addresses"]
+body = { assets = "{{body_json.assets}}", currency = "USD" }
+
+[[artur.endpoints.steps]]
+id = "insert_space"
+type = "store.execute"
+store = "artur"
+depends_on = ["schema", "sid", "ladon_addresses", "oracles_prices"]
+sql = "INSERT INTO spaces (sid, addresses_json, prices_json) VALUES (?1, ?2, ?3)"
+params = [
+  "{{steps.sid.json.sid}}",
+  "{{steps.ladon_addresses.json.addresses}}",
+  "{{steps.oracles_prices.json.prices}}",
+]
+
+[[artur.endpoints.steps]]
+id = "bria_paid_task"
+type = "http.request"
+transport = "bria"
+method = "POST"
+url = "/jobs"
+depends_on = ["insert_space", "pano_track"]
+body = { pipeline = "paid-space-task", sid = "{{steps.sid.json.sid}}", payload = "{{request_json}}", payment = "{{header.x-payment}}" }
+
+# GET /v1/spaces/{sid}/summary fans out to multiple stores in parallel and
+# renders a combined response once all queries complete.
+[[artur.endpoints]]
+name = "space_summary"
+method = "GET"
+path = "/v1/spaces/{sid}/summary"
+action = "workflow.run"
+
+[artur.endpoints.result]
+include_steps = false
+body = { sid = "{{param.sid}}", space = "{{steps.space.rows.0}}", ladon_addresses = "{{steps.ladon_rows.rows}}", pano_events = "{{steps.pano_rows.rows}}", oracle_rates = "{{steps.oracle_rows.rows}}" }
+
+[[artur.endpoints.steps]]
+id = "space"
+type = "store.query"
+store = "artur"
+sql = "SELECT sid, addresses_json, prices_json, created_at FROM spaces WHERE sid = ?1"
+params = ["{{param.sid}}"]
+
+[[artur.endpoints.steps]]
+id = "ladon_rows"
+type = "store.query"
+store = "ladon"
+sql = "SELECT chain, address, path, is_used FROM derived_addresses WHERE sid = ?1"
+params = ["{{param.sid}}"]
+
+[[artur.endpoints.steps]]
+id = "pano_rows"
+type = "store.query"
+store = "pano"
+sql = "SELECT event_type, payload, created_at FROM events WHERE subject_id = ?1 ORDER BY created_at DESC LIMIT 20"
+params = ["{{param.sid}}"]
+
+[[artur.endpoints.steps]]
+id = "oracle_rows"
+type = "store.query"
+store = "oracles"
+sql = "SELECT asset, currency, price, observed_at FROM rates WHERE currency = 'USD' ORDER BY observed_at DESC LIMIT 100"
+
+# ── Tasks Artur runs locally. Cross-package runtime calls above use HTTP transports.
+[[artur.tasks]]
+name = "altcha_verify"
+mode = "sync"
+command = "altcha"
+args = ["verify", "--input", "{{request_json}}"]
+stdout_format = "json"
+
+[[artur.tasks]]
+name = "x402_verify"
+mode = "sync"
+command = "bria"
+args = ["--config", "Config.toml", "x402", "verify", "--request", "{{request_json}}"]
+stdout_format = "json"
+
+[[artur.tasks]]
+name = "sid_create"
+mode = "sync"
+command = "python3"
+args = ["-c", "import json, secrets; print(json.dumps({'sid': secrets.token_urlsafe(18)}))"]
+stdout_format = "json"
