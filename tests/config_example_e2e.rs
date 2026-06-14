@@ -49,10 +49,7 @@ async fn config_example_all_active_endpoints_succeed() {
 
     // 2. task.run sync — echo_call with path param and query param
     let echo: Value = client
-        .post(format!(
-            "{}/v1/echo/alice?source=e2e",
-            server.base_url
-        ))
+        .post(format!("{}/v1/echo/alice?source=e2e", server.base_url))
         .send()
         .await
         .unwrap()
@@ -1180,7 +1177,9 @@ method = "GET"
 async fn template_placeholders_all_context_variables() {
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
-    unsafe { std::env::set_var("ARTUR_TEST_ENV", "env-value"); }
+    unsafe {
+        std::env::set_var("ARTUR_TEST_ENV", "env-value");
+    }
 
     let config_toml = format!(
         r#"
@@ -1286,13 +1285,219 @@ body = {{ ok = true }}
 }
 
 // ===========================================================================
+//  Helpers
+// ===========================================================================
+
+async fn spawn_artur(config_path: &Path, port: u16, temp_dir: TempDir) -> RunningArtur {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_artur"))
+        .arg("--config")
+        .arg(config_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+    for _ in 0..200 {
+        if let Ok(Some(status)) = child.try_wait() {
+            let mut stderr = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                use std::io::Read;
+                let _ = s.read_to_string(&mut stderr);
+            }
+            panic!("artur exited before becoming ready with status {status}\nstderr: {stderr}");
+        }
+        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
+            && response.status() == StatusCode::OK
+        {
+            return RunningArtur {
+                child,
+                base_url,
+                _temp_dir: temp_dir,
+            };
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = child.kill();
+    panic!("artur did not become ready on port {port}");
+}
+
+fn write_example_config(temp_dir: &Path, port: u16) -> PathBuf {
+    let config_path = temp_dir.join("config.toml");
+
+    let echo_py = temp_dir.join("echo.py");
+    fs::write(
+        &echo_py,
+        r#"#!/usr/bin/env python3
+import argparse, json, sys
+parser = argparse.ArgumentParser()
+parser.add_argument("--name", default="")
+parser.add_argument("--source", default="")
+args = parser.parse_args()
+stdin = sys.stdin.read()
+try:
+    request = json.loads(stdin) if stdin else None
+except json.JSONDecodeError:
+    request = stdin
+print(json.dumps({"ok":True,"name":args.name,"source":args.source,"request":request}, separators=(",",":")))
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&echo_py).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&echo_py, perms).unwrap();
+    }
+
+    let long_task_py = temp_dir.join("long_task.py");
+    fs::write(
+        &long_task_py,
+        r#"#!/usr/bin/env python3
+import json, sys, time
+body = sys.stdin.read()
+time.sleep(0.05)
+print(json.dumps({"ok": True, "received": body}, separators=(",", ":")))
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&long_task_py).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&long_task_py, perms).unwrap();
+    }
+
+    let config = format!(
+        r#"
+version = 1
+
+[log]
+level = "artur=info,tower_http=info"
+
+[artur.server]
+bind = "127.0.0.1"
+port = {port}
+
+[[artur.tasks]]
+name = "echo"
+mode = "sync"
+command = "python3"
+args = [
+    "{echo_py}",
+    "--name", "{{{{param.name}}}}",
+    "--source", "{{{{query.source}}}}",
+]
+inherit_env = true
+success_exit_codes = [0]
+timeout_ms = 10000
+max_stdout_bytes = 1048576
+max_stderr_bytes = 1048576
+stdout_format = "json"
+
+[artur.tasks.stdin]
+type = "request_json"
+
+[[artur.tasks]]
+name = "long_job"
+mode = "async"
+command = "python3"
+args = ["{long_task_py}"]
+timeout_ms = 30000
+stdout_format = "json"
+
+[artur.tasks.stdin]
+type = "body"
+
+[[artur.endpoints]]
+name = "health"
+method = "GET"
+path = "/health"
+action = "respond.static"
+
+[artur.endpoints.response]
+status = 200
+body = {{ ok = true, service = "artur" }}
+
+[[artur.endpoints]]
+name = "echo_call"
+method = "POST"
+path = "/v1/echo/{{name}}"
+action = "task.run"
+task = "echo"
+
+[[artur.endpoints]]
+name = "get_job"
+method = "GET"
+path = "/v1/jobs/{{job_id}}"
+action = "job.get"
+
+[[artur.endpoints]]
+name = "long_job_start"
+method = "POST"
+path = "/v1/long-job"
+action = "task.run"
+task = "long_job"
+
+[[artur.endpoints]]
+name = "compose"
+method = "POST"
+path = "/v1/compose/{{name}}"
+action = "workflow.run"
+
+[artur.endpoints.result]
+status = 200
+body = {{ ok = true, echo_name = "{{{{steps.enrich.json.name}}}}", echo_source = "{{{{steps.enrich.json.source}}}}" }}
+include_steps = false
+
+[[artur.endpoints.steps]]
+id = "enrich"
+type = "task"
+task = "echo"
+"#,
+        echo_py = path_for_toml(&echo_py),
+        long_task_py = path_for_toml(&long_task_py),
+    );
+    fs::write(&config_path, config).unwrap();
+    config_path
+}
+
+fn unused_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn path_for_toml(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
+trait JsonLike {
+    async fn json_like(self) -> Value;
+}
+
+impl JsonLike for reqwest::Response {
+    async fn json_like(self) -> Value {
+        let text = self.text().await.unwrap();
+        serde_json::from_str(&text)
+            .unwrap_or_else(|err| panic!("invalid JSON response {text:?}: {err}"))
+    }
+}
+
+// ===========================================================================
 //  Unit-level parsing tests (no server needed)
 // ===========================================================================
 
 #[cfg(test)]
 mod unit {
-    use artur::config::*;
     use artur::AppConfig;
+    use artur::config::*;
 
     #[test]
     fn parses_all_root_sections() {
@@ -1367,8 +1572,14 @@ body = { ok = true }
         assert_eq!(cfg.http.api_key.as_deref(), Some("global-secret"));
         assert_eq!(cfg.paths["data"].path, "/data");
         assert_eq!(cfg.paths["data"].format.as_deref(), Some("json"));
-        assert_eq!(cfg.transports.http["upstream"].base_url, "http://upstream:4000/v1");
-        assert_eq!(cfg.transports.http["upstream"].headers["authorization"], "Bearer key");
+        assert_eq!(
+            cfg.transports.http["upstream"].base_url,
+            "http://upstream:4000/v1"
+        );
+        assert_eq!(
+            cfg.transports.http["upstream"].headers["authorization"],
+            "Bearer key"
+        );
         assert_eq!(cfg.transports.http["upstream"].timeout_ms, Some(15000));
         assert_eq!(cfg.stores["db"].driver, StoreDriver::Sqlite);
         assert_eq!(cfg.stores["db"].url, "sqlite://data.db");
@@ -1602,211 +1813,5 @@ command = "true"
 
         let e = &ep.steps[4];
         assert_eq!(e.kind, WorkflowStepKind::Respond);
-    }
-}
-
-// ===========================================================================
-//  Helpers
-// ===========================================================================
-
-async fn spawn_artur(config_path: &Path, port: u16, temp_dir: TempDir) -> RunningArtur {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_artur"))
-        .arg("--config")
-        .arg(config_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let base_url = format!("http://127.0.0.1:{port}");
-    let client = reqwest::Client::new();
-    for _ in 0..200 {
-        if let Ok(Some(status)) = child.try_wait() {
-            let mut stderr = String::new();
-            if let Some(mut s) = child.stderr.take() {
-                use std::io::Read;
-                let _ = s.read_to_string(&mut stderr);
-            }
-            panic!("artur exited before becoming ready with status {status}\nstderr: {stderr}");
-        }
-        if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await
-            && response.status() == StatusCode::OK
-        {
-            return RunningArtur {
-                child,
-                base_url,
-                _temp_dir: temp_dir,
-            };
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let _ = child.kill();
-    panic!("artur did not become ready on port {port}");
-}
-
-fn write_example_config(temp_dir: &Path, port: u16) -> PathBuf {
-    let config_path = temp_dir.join("config.toml");
-
-    let echo_py = temp_dir.join("echo.py");
-    fs::write(
-        &echo_py,
-        r#"#!/usr/bin/env python3
-import argparse, json, sys
-parser = argparse.ArgumentParser()
-parser.add_argument("--name", default="")
-parser.add_argument("--source", default="")
-args = parser.parse_args()
-stdin = sys.stdin.read()
-try:
-    request = json.loads(stdin) if stdin else None
-except json.JSONDecodeError:
-    request = stdin
-print(json.dumps({"ok":True,"name":args.name,"source":args.source,"request":request}, separators=(",",":")))
-"#,
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&echo_py).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&echo_py, perms).unwrap();
-    }
-
-    let long_task_py = temp_dir.join("long_task.py");
-    fs::write(
-        &long_task_py,
-        r#"#!/usr/bin/env python3
-import json, sys, time
-body = sys.stdin.read()
-time.sleep(0.05)
-print(json.dumps({"ok": True, "received": body}, separators=(",", ":")))
-"#,
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&long_task_py).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&long_task_py, perms).unwrap();
-    }
-
-    let config = format!(
-        r#"
-version = 1
-
-[log]
-level = "artur=info,tower_http=info"
-
-[artur.server]
-bind = "127.0.0.1"
-port = {port}
-
-[[artur.tasks]]
-name = "echo"
-mode = "sync"
-command = "python3"
-args = [
-    "{echo_py}",
-    "--name", "{{{{param.name}}}}",
-    "--source", "{{{{query.source}}}}",
-]
-inherit_env = true
-success_exit_codes = [0]
-timeout_ms = 10000
-max_stdout_bytes = 1048576
-max_stderr_bytes = 1048576
-stdout_format = "json"
-
-[artur.tasks.stdin]
-type = "request_json"
-
-[[artur.tasks]]
-name = "long_job"
-mode = "async"
-command = "python3"
-args = ["{long_task_py}"]
-timeout_ms = 30000
-stdout_format = "json"
-
-[artur.tasks.stdin]
-type = "body"
-
-[[artur.endpoints]]
-name = "health"
-method = "GET"
-path = "/health"
-action = "respond.static"
-
-[artur.endpoints.response]
-status = 200
-body = {{ ok = true, service = "artur" }}
-
-[[artur.endpoints]]
-name = "echo_call"
-method = "POST"
-path = "/v1/echo/{{name}}"
-action = "task.run"
-task = "echo"
-
-[[artur.endpoints]]
-name = "get_job"
-method = "GET"
-path = "/v1/jobs/{{job_id}}"
-action = "job.get"
-
-[[artur.endpoints]]
-name = "long_job_start"
-method = "POST"
-path = "/v1/long-job"
-action = "task.run"
-task = "long_job"
-
-[[artur.endpoints]]
-name = "compose"
-method = "POST"
-path = "/v1/compose/{{name}}"
-action = "workflow.run"
-
-[artur.endpoints.result]
-status = 200
-body = {{ ok = true, echo_name = "{{{{steps.enrich.json.name}}}}", echo_source = "{{{{steps.enrich.json.source}}}}" }}
-include_steps = false
-
-[[artur.endpoints.steps]]
-id = "enrich"
-type = "task"
-task = "echo"
-"#,
-        echo_py = path_for_toml(&echo_py),
-        long_task_py = path_for_toml(&long_task_py),
-    );
-    fs::write(&config_path, config).unwrap();
-    config_path
-}
-
-fn unused_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn path_for_toml(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-}
-
-trait JsonLike {
-    async fn json_like(self) -> Value;
-}
-
-impl JsonLike for reqwest::Response {
-    async fn json_like(self) -> Value {
-        let text = self.text().await.unwrap();
-        serde_json::from_str(&text)
-            .unwrap_or_else(|err| panic!("invalid JSON response {text:?}: {err}"))
     }
 }
