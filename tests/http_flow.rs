@@ -1,9 +1,11 @@
 use artur::{config::*, load_config, server::build_router};
 use axum::{
     body::{Body, to_bytes},
+    extract::ConnectInfo,
     http::{Request, StatusCode},
 };
 use serde_json::Value;
+use std::net::SocketAddr;
 use tower::ServiceExt;
 
 fn test_config() -> AppConfig {
@@ -21,6 +23,8 @@ fn test_config() -> AppConfig {
             }),
             security: EndpointSecurityConfig::default(),
             body_limit_bytes: None,
+            restrictions: EndpointRestrictions::default(),
+            idempotency: None,
             steps: vec![],
             result: WorkflowResponseConfig::default(),
         },
@@ -33,6 +37,8 @@ fn test_config() -> AppConfig {
             response: None,
             security: EndpointSecurityConfig::default(),
             body_limit_bytes: None,
+            restrictions: EndpointRestrictions::default(),
+            idempotency: None,
             steps: vec![],
             result: WorkflowResponseConfig::default(),
         },
@@ -45,6 +51,8 @@ fn test_config() -> AppConfig {
             response: None,
             security: EndpointSecurityConfig::default(),
             body_limit_bytes: None,
+            restrictions: EndpointRestrictions::default(),
+            idempotency: None,
             steps: vec![],
             result: WorkflowResponseConfig::default(),
         },
@@ -57,6 +65,8 @@ fn test_config() -> AppConfig {
             response: None,
             security: EndpointSecurityConfig::default(),
             body_limit_bytes: None,
+            restrictions: EndpointRestrictions::default(),
+            idempotency: None,
             steps: vec![],
             result: WorkflowResponseConfig::default(),
         },
@@ -106,7 +116,13 @@ fn test_config() -> AppConfig {
 
 #[tokio::test]
 async fn static_endpoint_returns_configured_json() {
-    let app = build_router(test_config()).await.unwrap();
+    let app = build_router(test_config())
+        .await
+        .unwrap()
+        .layer(axum::Extension(ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            1,
+        )))));
     let response = app
         .oneshot(
             Request::builder()
@@ -126,7 +142,13 @@ async fn static_endpoint_returns_configured_json() {
 
 #[tokio::test]
 async fn process_endpoint_can_read_body_and_return_parsed_json() {
-    let app = build_router(test_config()).await.unwrap();
+    let app = build_router(test_config())
+        .await
+        .unwrap()
+        .layer(axum::Extension(ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            1,
+        )))));
     let response = app
         .oneshot(
             Request::builder()
@@ -148,7 +170,13 @@ async fn process_endpoint_can_read_body_and_return_parsed_json() {
 
 #[tokio::test]
 async fn async_process_endpoint_returns_job_and_job_result() {
-    let app = build_router(test_config()).await.unwrap();
+    let app = build_router(test_config())
+        .await
+        .unwrap()
+        .layer(axum::Extension(ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            1,
+        )))));
     let response = app
         .clone()
         .oneshot(
@@ -256,7 +284,13 @@ stdout_format = "json"
     .unwrap();
 
     let cfg = load_config(config_path.to_str().unwrap()).await.unwrap();
-    let app = build_router(cfg).await.unwrap();
+    let app = build_router(cfg)
+        .await
+        .unwrap()
+        .layer(axum::Extension(ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            1,
+        )))));
     let response = app
         .oneshot(
             Request::builder()
@@ -272,4 +306,198 @@ stdout_format = "json"
     let value: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(value["sid"], "sid-1");
     assert_eq!(value["symbol"], "ETH");
+}
+
+#[tokio::test]
+async fn idempotency_replays_response_and_rejects_different_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("idempotency.sqlite3");
+    let config = format!(
+        r#"version = 1
+[stores.ledger]
+driver = "sqlite"
+url = "sqlite://{}"
+[[artur.endpoints]]
+name = "create"
+method = "POST"
+path = "/create"
+action = "respond.static"
+[artur.endpoints.response]
+status = 201
+body = {{ created = true }}
+[artur.endpoints.response.headers]
+x-created = "yes"
+[artur.endpoints.idempotency]
+store = "ledger"
+ttl_secs = 60
+"#,
+        database.display()
+    );
+    let config: AppConfig = toml::from_str(&config).unwrap();
+    let app = build_router(config)
+        .await
+        .unwrap()
+        .layer(axum::Extension(ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            1,
+        )))));
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/create")
+            .header("idempotency-key", "key-1")
+            .body(Body::from("one"))
+            .unwrap()
+    };
+    let first = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(first.status(), StatusCode::CREATED);
+    assert_eq!(first.headers()["x-created"], "yes");
+    let second = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(second.status(), StatusCode::CREATED);
+    assert_eq!(second.headers()["x-created"], "yes");
+    let conflict = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/create")
+                .header("idempotency-key", "key-1")
+                .body(Body::from("two"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn idempotent_replay_consumes_rate_quota_and_carries_rate_headers() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("idempotency-rate.sqlite3");
+    let config: AppConfig = toml::from_str(&format!(
+        r#"version = 1
+[stores.ledger]
+driver = "sqlite"
+url = "sqlite://{}"
+[[artur.endpoints]]
+name = "create_rate"
+method = "POST"
+path = "/create-rate"
+action = "respond.static"
+[artur.endpoints.response]
+status = 201
+body = {{ created = true }}
+[artur.endpoints.response.headers]
+x-created = "yes"
+[artur.endpoints.idempotency]
+store = "ledger"
+ttl_secs = 60
+[artur.endpoints.security.rate_limit]
+store = "ledger"
+key = "{{{{client.ip}}}}"
+requests = 2
+window_secs = 60
+"#,
+        database.display()
+    ))
+    .unwrap();
+    let app = build_router(config)
+        .await
+        .unwrap()
+        .layer(axum::Extension(ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            1,
+        )))));
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/create-rate")
+            .header("idempotency-key", "same-key")
+            .body(Body::from("one"))
+            .unwrap()
+    };
+    let first = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(first.status(), StatusCode::CREATED);
+    assert!(
+        first.headers()["ratelimit"]
+            .to_str()
+            .unwrap()
+            .starts_with("\"2\";r=1;t=")
+    );
+    let first_body = to_bytes(first.into_body(), 1024 * 1024).await.unwrap();
+    let replay = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(replay.status(), StatusCode::CREATED);
+    assert_eq!(replay.headers()["x-created"], "yes");
+    assert!(
+        replay.headers()["ratelimit"]
+            .to_str()
+            .unwrap()
+            .starts_with("\"2\";r=0;t=")
+    );
+    assert_eq!(
+        to_bytes(replay.into_body(), 1024 * 1024).await.unwrap(),
+        first_body
+    );
+    let denied = app.oneshot(request()).await.unwrap();
+    assert_eq!(denied.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(denied.headers().contains_key("retry-after"));
+    assert!(denied.headers().contains_key("ratelimit"));
+    assert!(denied.headers().contains_key("ratelimit-policy"));
+}
+
+#[tokio::test]
+#[ignore = "requires ARTUR_POSTGRES_URL pointing to a disposable PostgreSQL database"]
+async fn postgres_idempotency_replays_response() {
+    let url = std::env::var("ARTUR_POSTGRES_URL").expect("ARTUR_POSTGRES_URL is required");
+    let config: AppConfig = toml::from_str(&format!(
+        r#"version = 1
+[stores.ledger]
+driver = "postgres"
+url = {url:?}
+[[artur.endpoints]]
+name = "create_pg"
+method = "POST"
+path = "/create-pg"
+action = "respond.static"
+[artur.endpoints.response]
+status = 201
+body = {{ created = true }}
+[artur.endpoints.response.headers]
+x-created = "yes"
+[artur.endpoints.idempotency]
+store = "ledger"
+ttl_secs = 60
+"#
+    ))
+    .unwrap();
+    let app = build_router(config)
+        .await
+        .unwrap()
+        .layer(axum::Extension(ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            1,
+        )))));
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/create-pg")
+            .header("idempotency-key", uuid::Uuid::new_v4().to_string())
+            .body(Body::from("one"))
+            .unwrap()
+    };
+    let first = request();
+    let key = first.headers()["idempotency-key"].clone();
+    assert_eq!(
+        app.clone().oneshot(first).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+    let replay = Request::builder()
+        .method("POST")
+        .uri("/create-pg")
+        .header("idempotency-key", key)
+        .body(Body::from("one"))
+        .unwrap();
+    assert_eq!(
+        app.oneshot(replay).await.unwrap().status(),
+        StatusCode::CREATED
+    );
 }

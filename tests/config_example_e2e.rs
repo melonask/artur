@@ -1507,20 +1507,12 @@ version = 1
 [log]
 level = "debug"
 format = "json"
-file = "/tmp/log"
 
 [runtime]
 worker_threads = 2
 shutdown_timeout_secs = 15
 tmp_dir = "/tmp/artur"
 max_payload_bytes = 524288
-
-[http]
-bind = "0.0.0.0"
-port = 9090
-prefix = "api"
-max_body_bytes = 65536
-api_key = "global-secret"
 
 [paths.data]
 path = "/data"
@@ -1536,9 +1528,7 @@ authorization = "Bearer key"
 [stores.db]
 driver = "sqlite"
 url = "sqlite://data.db"
-migrate = false
 connect_timeout_secs = 5
-max_connections = 4
 
 [artur.server]
 bind = "127.0.0.1"
@@ -1559,17 +1549,11 @@ body = { ok = true }
 
         assert_eq!(cfg.version, 1);
         assert_eq!(cfg.log.level.as_deref(), Some("debug"));
-        assert_eq!(cfg.log.format.as_deref(), Some("json"));
-        assert_eq!(cfg.log.file.as_deref(), Some("/tmp/log"));
+        assert_eq!(cfg.log.format, Some(LogFormat::Json));
         assert_eq!(cfg.runtime.worker_threads, Some(2));
         assert_eq!(cfg.runtime.shutdown_timeout_secs, Some(15));
         assert_eq!(cfg.runtime.tmp_dir.as_deref(), Some("/tmp/artur"));
         assert_eq!(cfg.runtime.max_payload_bytes, Some(524288));
-        assert_eq!(cfg.http.bind.as_deref(), Some("0.0.0.0"));
-        assert_eq!(cfg.http.port, Some(9090));
-        assert_eq!(cfg.http.prefix.as_deref(), Some("api"));
-        assert_eq!(cfg.http.max_body_bytes, Some(65536));
-        assert_eq!(cfg.http.api_key.as_deref(), Some("global-secret"));
         assert_eq!(cfg.paths["data"].path, "/data");
         assert_eq!(cfg.paths["data"].format.as_deref(), Some("json"));
         assert_eq!(
@@ -1584,7 +1568,6 @@ body = { ok = true }
         assert_eq!(cfg.stores["db"].driver, StoreDriver::Sqlite);
         assert_eq!(cfg.stores["db"].url, "sqlite://data.db");
         assert_eq!(cfg.stores["db"].connect_timeout_secs, Some(5));
-        assert_eq!(cfg.stores["db"].max_connections, Some(4));
 
         let server = cfg.server_config();
         assert_eq!(server.bind, "127.0.0.1");
@@ -1593,18 +1576,10 @@ body = { ok = true }
     }
 
     #[test]
-    fn server_config_cascade_priority() {
+    fn server_config_uses_artur_namespace_only() {
         let cfg: AppConfig = toml::from_str(
             r#"
 version = 1
-
-[runtime]
-max_payload_bytes = 1000
-
-[http]
-bind = "0.0.0.0"
-port = 8000
-max_body_bytes = 2000
 
 [artur.server]
 bind = "127.0.0.1"
@@ -1623,8 +1598,8 @@ body = { ok = true }
         cfg.validate().unwrap();
         let s = cfg.server_config();
         assert_eq!(s.bind, "127.0.0.1");
-        assert_eq!(s.port, 8000);
-        assert_eq!(s.body_limit_bytes, 2000);
+        assert_eq!(s.port, 46796);
+        assert_eq!(s.body_limit_bytes, 1_048_576);
     }
 
     #[test]

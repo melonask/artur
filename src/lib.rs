@@ -14,7 +14,9 @@
 pub mod api;
 pub mod config;
 pub mod error;
+pub mod idempotency;
 pub mod process;
+pub mod rate_limit;
 pub mod security;
 pub mod server;
 pub mod store;

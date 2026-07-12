@@ -4,14 +4,14 @@
 #  Every available parameter is listed below with a comment explaining its
 #  purpose and default value.  Only `version` and at least one endpoint are
 #  required; all other sections and keys are optional.
+#  Environment-variable references (for example, `$` followed by `{NAME}`) are
+#  expanded from Artur's environment before TOML parsing;
+#  an unset reference makes configuration validation fail without exposing values.
 #
 #  Usage:
-#    artur --config Config.example.toml            # local file
-#    artur --config https://example.com/cfg.toml    # fetch over HTTP(S)
+#    artur --config Config.example.toml check       # validation only
 #
-#  CLI overrides:
-#    --config <PATH|URL>   Path or URL to the TOML config (env: ARTUR_CONFIG)
-#    --port <PORT>         Override [artur.server].port at runtime (env: ARTUR_PORT)
+#  CLI: --config <PATH> is required (or ARTUR_CONFIG is set).
 # =============================================================================
 
 
@@ -29,12 +29,10 @@ version = 1
 # Default (when both log.level and RUST_LOG are unset): "artur=info,tower_http=info"
 level = "artur=info,tower_http=info"
 
-# Output format.  Recognised values depend on the tracing subscriber;
-# commonly "json" or "pretty".  (optional)
+# Output format: "json" for structured logs or "pretty" for human-readable logs.
+# When omitted, tracing's compact default formatter writes to stderr. (optional)
 # format = "json"
 
-# File path for log output.  When unset logs go to stderr.  (optional)
-# file = "/var/log/artur.log"
 
 
 # ---- Runtime ---------------------------------------------------------------
@@ -49,30 +47,9 @@ level = "artur=info,tower_http=info"
 # Temporary directory for file-based operations.  (optional)
 # tmp_dir = "/tmp/artur"
 
-# Maximum HTTP payload size in bytes (used if neither http.max_body_bytes
-# nor artur.server.body_limit_bytes is set).  (optional)
+# Shared runtime metadata for universal Config.toml consumers. Artur request
+# limits are configured only by artur.server.body_limit_bytes. (optional)
 # max_payload_bytes = 1048576
-
-
-# ---- HTTP defaults ---------------------------------------------------------
-# These cascade into the final server configuration.  Values in [artur.server]
-# take priority, then [http], then [runtime] for body limits.
-[http]
-
-# Bind address (e.g. "0.0.0.0" or "127.0.0.1").  (optional)
-# bind = "0.0.0.0"
-
-# Listening port.  (optional)
-# port = 8080
-
-# URL prefix prepended to every endpoint path (e.g. "v1").  (optional)
-# prefix = "v1"
-
-# Maximum request body size in bytes.  (optional)
-# max_body_bytes = 1048576
-
-# Global API key applied to all endpoints that don't define their own.  (optional)
-# api_key = "secret"
 
 
 # ---- Filesystem paths -------------------------------------------------------
@@ -95,24 +72,28 @@ level = "artur=info,tower_http=info"
 
 
 # ---- Stores (databases) ----------------------------------------------------
-# Keyed SQL database profiles.  Currently the built-in executor supports
-# sqlite; postgres is accepted by the schema but requires an external task.
+# Keyed SQL database profiles. The built-in executor supports SQLite and PostgreSQL.
 
 # [stores.main]
 # driver = "sqlite"                      # "sqlite" or "postgres" (required)
 # url = "sqlite://data/app.db"           # connection URL (required)
-# migrate = true                         # reserved for auto-migration (optional)
-# connect_timeout_secs = 10              # connection timeout in seconds (optional)
-# max_connections = 8                    # max connection pool size (optional)
+# connect_timeout_secs = 10              # SQLite busy timeout in seconds (default: 5)
+# # PostgreSQL example: url = "postgres://db:5432/app"
 
 
 # ---- Artur server ----------------------------------------------------------
-# Highest-priority server settings (overrides [http] and [runtime]).
+# Canonical Artur server settings.
 [artur.server]
 
 # bind = "127.0.0.1"        # default: "127.0.0.1"
 # port = 46796              # default: 46796
 # body_limit_bytes = 1048576  # default: 1_048_576 (1 MiB)
+
+# Trust forwarding data only from explicitly listed reverse proxies. The TCP peer
+# remains the client identity otherwise; choose exactly one header mode.
+# [artur.server.client_ip]
+# trusted_proxy_cidrs = ["10.0.0.0/8", "2001:db8::/32"]
+# header = "x-forwarded-for" # or "forwarded"
 
 
 # =============================================================================
@@ -182,6 +163,11 @@ method = "GET"                      # GET | POST | PUT | PATCH | DELETE (require
 path = "/health"                    # URL path; supports {param} and :param placeholders (required)
 action = "respond.static"           # (required)
 # body_limit_bytes = 65536          # per-endpoint body limit override (optional)
+# [artur.endpoints.restrictions]
+# allowed_content_types = ["application/json"] # required only when a body is sent
+# required_headers = ["x-request-id"]
+# timeout_ms = 30000                 # guards, idempotency, and action deadline
+# max_concurrency = 32               # rejects excess requests with 429; never queues
 
 [artur.endpoints.response]
 status = 200                        # HTTP status code; default: 200
@@ -197,6 +183,16 @@ method = "POST"
 path = "/v1/echo/{name}"
 action = "task.run"
 task = "echo"                       # references a [[artur.tasks]] entry (required)
+
+# Optional durable Idempotency-Key replay for mutating endpoints. Requests
+# without this header execute normally. Reusing a key with a different request
+# returns 422. The configured SQLite or PostgreSQL store must be persistent and
+# shared by all Artur instances serving this route.
+# [artur.endpoints.idempotency]
+# store = "main"                       # configured SQLite store (required)
+# header = "idempotency-key"           # default
+# ttl_secs = 86400                     # default: 24 hours
+# max_response_bytes = 1048576         # maximum stored/replayed response body
 
 
 # --- 3. Job-get endpoint (poll async task result) ---------------------------
@@ -286,6 +282,11 @@ continue_on_error = false           # keep going if this step fails; default: fa
 # task = "echo"
 #
 # [artur.endpoints.security]
+# [artur.endpoints.security.rate_limit]
+# store = "main"                     # persistent shared SQLite/PostgreSQL store
+# key = "{{client.ip}}"              # template; key is hashed before storage
+# requests = 100
+# window_secs = 60
 #
 # # --- API key verification ---
 # [artur.endpoints.security.api_key]
@@ -318,6 +319,8 @@ continue_on_error = false           # keep going if this step fails; default: fa
 # =============================================================================
 # Most string values (args, env vars, headers, bodies, SQL, URLs, etc.)
 # support the following template placeholders:
+# `{{client.ip}}` is the TCP peer, or a safely resolved client IP when the
+# configured trusted proxy policy accepts the configured forwarding header.
 #
 #   {{method}}              — HTTP method (e.g. "POST")
 #   {{uri}}                 — full request URI including query string

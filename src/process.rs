@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestContext {
+    pub client: ClientContext,
     pub method: String,
     pub uri: String,
     pub path: String,
@@ -23,8 +24,15 @@ pub struct RequestContext {
     pub query: BTreeMap<String, String>,
     pub headers: BTreeMap<String, String>,
     pub body: String,
+    #[serde(default, skip_serializing)]
+    pub body_bytes: Vec<u8>,
     pub body_json: Option<Value>,
     pub steps: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientContext {
+    pub ip: String,
 }
 
 impl RequestContext {
@@ -37,9 +45,12 @@ impl RequestContext {
         headers: BTreeMap<String, String>,
         body: Bytes,
     ) -> Self {
+        let client_ip = String::new();
+        let body_bytes = body.to_vec();
         let body = String::from_utf8_lossy(&body).to_string();
         let body_json = serde_json::from_str(&body).ok();
         Self {
+            client: ClientContext { ip: client_ip },
             method,
             uri,
             path,
@@ -47,14 +58,21 @@ impl RequestContext {
             query,
             headers,
             body,
+            body_bytes,
             body_json,
             steps: BTreeMap::new(),
         }
     }
 
+    pub fn with_client_ip(mut self, client_ip: String) -> Self {
+        self.client.ip = client_ip;
+        self
+    }
+
     pub fn request_json(&self) -> Value {
         serde_json::json!({
             "method": self.method.clone(),
+            "client": self.client.clone(),
             "uri": self.uri.clone(),
             "path": self.path.clone(),
             "params": self.params.clone(),
@@ -340,6 +358,7 @@ pub fn lookup_template_value(key: &str, request: &RequestContext) -> String {
 pub fn lookup_template_json_value(key: &str, request: &RequestContext) -> Option<Value> {
     match key {
         "method" => Some(Value::String(request.method.clone())),
+        "client.ip" => Some(Value::String(request.client.ip.clone())),
         "uri" => Some(Value::String(request.uri.clone())),
         "path" => Some(Value::String(request.path.clone())),
         "body" => Some(Value::String(request.body.clone())),
@@ -472,21 +491,15 @@ pub fn hashmap_to_btree(input: HashMap<String, String>) -> BTreeMap<String, Stri
     input.into_iter().collect()
 }
 
-pub fn btree_to_json_object(input: &BTreeMap<String, String>) -> Value {
-    Value::Object(
-        input
-            .iter()
-            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
-            .collect::<Map<String, Value>>(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn context() -> RequestContext {
         RequestContext {
+            client: ClientContext {
+                ip: "127.0.0.1".to_string(),
+            },
             method: "POST".to_string(),
             uri: "/run/abc?x=1".to_string(),
             path: "/run/abc".to_string(),
@@ -494,6 +507,7 @@ mod tests {
             query: BTreeMap::from([("x".to_string(), "1".to_string())]),
             headers: BTreeMap::from([("authorization".to_string(), "Bearer token".to_string())]),
             body: r#"{"name":"Ada","items":["a","b"]}"#.to_string(),
+            body_bytes: br#"{"name":"Ada","items":["a","b"]}"#.to_vec(),
             body_json: Some(serde_json::json!({ "name": "Ada", "items": ["a", "b"] })),
             steps: BTreeMap::from([(
                 "sid".to_string(),

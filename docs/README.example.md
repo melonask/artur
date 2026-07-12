@@ -19,13 +19,7 @@ docker run --rm -p 46796:46796 ghcr.io/melonask/artur:latest
 ## Run
 
 ```bash
-artur --config http://example.com/config.toml
-```
-
-For local development:
-
-```bash
-artur --config examples/config.toml --port 46796
+artur --config Config.toml
 ```
 
 For Docker-based development, ensure the configuration binds to `0.0.0.0` inside the container so published ports are reachable from the host.

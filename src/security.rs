@@ -114,6 +114,7 @@ fn guard_output_allows(guard: &SecurityTaskConfig, json: Option<&Value>, payment
     };
     if let Some(path) = &guard.success_path {
         let request = RequestContext {
+            client: crate::process::ClientContext { ip: String::new() },
             method: String::new(),
             uri: String::new(),
             path: String::new(),
@@ -121,6 +122,7 @@ fn guard_output_allows(guard: &SecurityTaskConfig, json: Option<&Value>, payment
             query: BTreeMap::new(),
             headers: BTreeMap::new(),
             body: String::new(),
+            body_bytes: Vec::new(),
             body_json: None,
             steps: BTreeMap::from([("guard".to_string(), json.clone())]),
         };

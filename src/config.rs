@@ -1,9 +1,11 @@
 use crate::error::{ArturError, Result};
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    str::FromStr,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -14,8 +16,6 @@ pub struct AppConfig {
     pub log: LogConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
-    #[serde(default)]
-    pub http: HttpConfig,
     #[serde(default)]
     pub stores: BTreeMap<String, StoreConfig>,
     #[serde(default)]
@@ -32,7 +32,6 @@ impl Default for AppConfig {
             version: 1,
             log: LogConfig::default(),
             runtime: RuntimeConfig::default(),
-            http: HttpConfig::default(),
             stores: BTreeMap::new(),
             paths: BTreeMap::new(),
             transports: TransportsConfig::default(),
@@ -61,6 +60,24 @@ pub struct ArturServerConfig {
     pub port: Option<u16>,
     #[serde(default)]
     pub body_limit_bytes: Option<usize>,
+    #[serde(default)]
+    pub client_ip: ClientIpConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientIpConfig {
+    #[serde(default)]
+    pub trusted_proxy_cidrs: Vec<String>,
+    #[serde(default)]
+    pub header: Option<ClientIpHeader>,
+}
+
+#[derive(Debug, Copy, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClientIpHeader {
+    Forwarded,
+    XForwardedFor,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -75,9 +92,15 @@ pub struct LogConfig {
     #[serde(default)]
     pub level: Option<String>,
     #[serde(default)]
-    pub format: Option<String>,
-    #[serde(default)]
-    pub file: Option<String>,
+    pub format: Option<LogFormat>,
+}
+
+/// Rendering used by the process-wide tracing subscriber.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    Pretty,
+    Json,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -90,20 +113,6 @@ pub struct RuntimeConfig {
     pub tmp_dir: Option<String>,
     #[serde(default)]
     pub max_payload_bytes: Option<usize>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct HttpConfig {
-    #[serde(default)]
-    pub bind: Option<String>,
-    #[serde(default)]
-    pub port: Option<u16>,
-    #[serde(default)]
-    pub prefix: Option<String>,
-    #[serde(default)]
-    pub max_body_bytes: Option<usize>,
-    #[serde(default)]
-    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -135,11 +144,7 @@ pub struct StoreConfig {
     pub driver: StoreDriver,
     pub url: String,
     #[serde(default)]
-    pub migrate: bool,
-    #[serde(default)]
     pub connect_timeout_secs: Option<u64>,
-    #[serde(default)]
-    pub max_connections: Option<u32>,
 }
 
 #[derive(Debug, Copy, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -165,9 +170,38 @@ pub struct EndpointConfig {
     #[serde(default)]
     pub body_limit_bytes: Option<usize>,
     #[serde(default)]
+    pub restrictions: EndpointRestrictions,
+    #[serde(default)]
+    pub idempotency: Option<IdempotencyConfig>,
+    #[serde(default)]
     pub steps: Vec<WorkflowStepConfig>,
     #[serde(default)]
     pub result: WorkflowResponseConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointRestrictions {
+    #[serde(default)]
+    pub allowed_content_types: Vec<String>,
+    #[serde(default)]
+    pub required_headers: Vec<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_concurrency: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdempotencyConfig {
+    pub store: String,
+    #[serde(default = "default_idempotency_header")]
+    pub header: String,
+    #[serde(default = "default_idempotency_ttl_secs")]
+    pub ttl_secs: u64,
+    #[serde(default = "default_idempotency_max_response_bytes")]
+    pub max_response_bytes: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -272,6 +306,17 @@ pub struct EndpointSecurityConfig {
     pub x402: Option<SecurityTaskConfig>,
     #[serde(default)]
     pub failure_block: Option<FailureBlockConfig>,
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitConfig {
+    pub store: String,
+    pub key: String,
+    pub requests: u64,
+    pub window_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -410,15 +455,6 @@ impl Default for ServerConfig {
 impl AppConfig {
     pub fn server_config(&self) -> ServerConfig {
         let mut server = ServerConfig::default();
-        if let Some(bind) = self.http.bind.clone() {
-            server.bind = bind;
-        }
-        if let Some(port) = self.http.port {
-            server.port = port;
-        }
-        if let Some(limit) = self.http.max_body_bytes.or(self.runtime.max_payload_bytes) {
-            server.body_limit_bytes = limit;
-        }
         if let Some(bind) = self.artur.server.bind.clone() {
             server.bind = bind;
         }
@@ -445,6 +481,17 @@ impl AppConfig {
         }
 
         self.validate_shared_profiles()?;
+        for cidr in &self.artur.server.client_ip.trusted_proxy_cidrs {
+            IpNet::from_str(cidr)
+                .map_err(|_| ArturError::Config(format!("invalid trusted proxy CIDR {cidr}")))?;
+        }
+        if self.artur.server.client_ip.header.is_some()
+            && self.artur.server.client_ip.trusted_proxy_cidrs.is_empty()
+        {
+            return Err(ArturError::Config(
+                "artur.server.client_ip.header requires nonempty trusted_proxy_cidrs".to_string(),
+            ));
+        }
 
         let mut endpoint_names = BTreeSet::new();
         let mut endpoint_routes = BTreeSet::new();
@@ -509,6 +556,8 @@ impl AppConfig {
                 }
             }
             self.validate_security(endpoint)?;
+            self.validate_idempotency(endpoint)?;
+            self.validate_restrictions(endpoint)?;
         }
 
         let mut task_names = BTreeSet::new();
@@ -601,6 +650,114 @@ impl AppConfig {
             return Err(ArturError::Config(format!(
                 "endpoint {} failure_block limits must be greater than 0",
                 endpoint.name
+            )));
+        }
+        if let Some(rate) = &endpoint.security.rate_limit {
+            let Some(store) = self.stores.get(&rate.store) else {
+                return Err(ArturError::Config(format!(
+                    "endpoint {} rate_limit references unknown store {}",
+                    endpoint.name, rate.store
+                )));
+            };
+            if store.driver == StoreDriver::Sqlite && store.url == ":memory:" {
+                return Err(ArturError::Config(format!(
+                    "endpoint {} rate_limit store {} cannot use :memory:",
+                    endpoint.name, rate.store
+                )));
+            }
+            if rate.key.trim().is_empty()
+                || rate.requests == 0
+                || rate.window_secs == 0
+                || rate.requests > i64::MAX as u64
+                || rate.window_secs > i64::MAX as u64
+            {
+                return Err(ArturError::Config(format!(
+                    "endpoint {} rate_limit key must be nonempty and requests/window_secs must be positive bounded values",
+                    endpoint.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_restrictions(&self, endpoint: &EndpointConfig) -> Result<()> {
+        for media_type in &endpoint.restrictions.allowed_content_types {
+            if media_type.trim().is_empty()
+                || media_type.parse::<axum::http::HeaderValue>().is_err()
+                || !media_type.contains('/')
+            {
+                return Err(ArturError::Config(format!(
+                    "endpoint {} has invalid allowed content type",
+                    endpoint.name
+                )));
+            }
+        }
+        for header in &endpoint.restrictions.required_headers {
+            if header.trim().is_empty()
+                || axum::http::header::HeaderName::from_bytes(header.as_bytes()).is_err()
+            {
+                return Err(ArturError::Config(format!(
+                    "endpoint {} has invalid required header",
+                    endpoint.name
+                )));
+            }
+        }
+        if endpoint
+            .restrictions
+            .timeout_ms
+            .is_some_and(|v| v == 0 || v > 86_400_000)
+            || endpoint
+                .restrictions
+                .max_concurrency
+                .is_some_and(|v| v == 0 || v > 1_000_000)
+        {
+            return Err(ArturError::Config(format!(
+                "endpoint {} restrictions numeric values must be positive and bounded",
+                endpoint.name
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_idempotency(&self, endpoint: &EndpointConfig) -> Result<()> {
+        let Some(config) = &endpoint.idempotency else {
+            return Ok(());
+        };
+        if !matches!(
+            endpoint.method,
+            HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch | HttpMethod::Delete
+        ) {
+            return Err(ArturError::Config(format!(
+                "endpoint {} idempotency is only valid for POST, PUT, PATCH, or DELETE",
+                endpoint.name
+            )));
+        }
+        let Some(store) = self.stores.get(&config.store) else {
+            return Err(ArturError::Config(format!(
+                "endpoint {} idempotency references unknown store {}",
+                endpoint.name, config.store
+            )));
+        };
+        if store.driver == StoreDriver::Sqlite && store.url == ":memory:" {
+            return Err(ArturError::Config(format!(
+                "endpoint {} idempotency store {} cannot use :memory:",
+                endpoint.name, config.store
+            )));
+        }
+        if axum::http::header::HeaderName::from_bytes(config.header.as_bytes()).is_err() {
+            return Err(ArturError::Config(format!(
+                "endpoint {} idempotency header is invalid",
+                endpoint.name
+            )));
+        }
+        if config.ttl_secs == 0
+            || config.ttl_secs > i64::MAX as u64
+            || config.max_response_bytes == 0
+        {
+            return Err(ArturError::Config(format!(
+                "endpoint {} idempotency ttl_secs must be between 1 and {}, and max_response_bytes must be greater than 0",
+                endpoint.name,
+                i64::MAX
             )));
         }
         Ok(())
@@ -745,9 +902,58 @@ pub async fn load_config(location: &str) -> Result<AppConfig> {
         let path = Path::new(location);
         tokio::fs::read_to_string(path).await?
     };
-    let cfg: AppConfig = toml::from_str(&raw)?;
+    let expanded = expand_environment_variables(&raw)?;
+    let document: toml::Value = toml::from_str(&expanded)?;
+    if !document.get("artur").is_some_and(toml::Value::is_table) {
+        return Err(ArturError::Config(
+            "[artur] is required and must be a TOML table".to_string(),
+        ));
+    }
+    let cfg: AppConfig = toml::from_str(&expanded)?;
     cfg.validate()?;
     Ok(cfg)
+}
+
+fn expand_environment_variables(raw: &str) -> Result<String> {
+    expand_environment_variables_with(raw, |name| std::env::var(name).ok())
+}
+
+fn expand_environment_variables_with(
+    raw: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<String> {
+    let mut output = String::with_capacity(raw.len());
+    let mut remaining = raw;
+    while let Some(start) = remaining.find("${") {
+        output.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 2..];
+        let end = after_start.find('}').ok_or_else(|| {
+            ArturError::Config("unterminated environment variable reference".to_string())
+        })?;
+        let name = &after_start[..end];
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            || name
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_digit())
+        {
+            return Err(ArturError::Config(format!(
+                "invalid environment variable reference ${{{name}}}"
+            )));
+        }
+        let value = lookup(name).ok_or_else(|| {
+            ArturError::Config(format!(
+                "environment variable {name} is required by configuration"
+            ))
+        })?;
+        output.push_str(&value);
+        remaining = &after_start[end + 1..];
+    }
+    output.push_str(remaining);
+    Ok(output)
 }
 
 fn normalize_path_for_validation(path: &str) -> String {
@@ -825,6 +1031,16 @@ fn default_api_key_header() -> String {
     "authorization".to_string()
 }
 
+fn default_idempotency_header() -> String {
+    "idempotency-key".to_string()
+}
+fn default_idempotency_ttl_secs() -> u64 {
+    86_400
+}
+fn default_idempotency_max_response_bytes() -> usize {
+    1_048_576
+}
+
 fn default_failure_key() -> String {
     "{{header.authorization}}".to_string()
 }
@@ -844,6 +1060,27 @@ fn default_failure_block_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expands_universal_environment_references_without_exposing_values() {
+        let expanded = expand_environment_variables_with(
+            "url = \"${DATABASE_URL}\"\nchain = \"${PRIMARY_CHAIN_CAIP2}\"",
+            |name| match name {
+                "DATABASE_URL" => Some("postgres://db/app".to_string()),
+                "PRIMARY_CHAIN_CAIP2" => Some("eip155:1".to_string()),
+                _ => None,
+            },
+        )
+        .unwrap();
+        assert!(expanded.contains("postgres://db/app"));
+        assert!(expanded.contains("eip155:1"));
+        assert!(
+            expand_environment_variables_with("x = \"${MISSING}\"", |_| None)
+                .unwrap_err()
+                .to_string()
+                .contains("MISSING")
+        );
+    }
 
     #[test]
     fn parses_minimal_static_config_in_artur_namespace() {
@@ -900,8 +1137,8 @@ value = { ok = true }
 "#;
         let cfg: AppConfig = toml::from_str(raw).unwrap();
         cfg.validate().unwrap();
-        assert_eq!(cfg.server_config().bind, "0.0.0.0");
-        assert_eq!(cfg.server_config().port, 48080);
+        assert_eq!(cfg.server_config().bind, "127.0.0.1");
+        assert_eq!(cfg.server_config().port, 46796);
         assert_eq!(cfg.artur.endpoints[0].steps[0].id, "reply");
         assert!(cfg.stores.contains_key("artur"));
         assert!(cfg.transports.http.contains_key("ladon"));
@@ -915,6 +1152,16 @@ version = 1
         let cfg: AppConfig = toml::from_str(raw).unwrap();
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("at least one [[artur.endpoints]]"));
+    }
+
+    #[tokio::test]
+    async fn load_requires_explicit_artur_namespace() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "version = 1\n[ladon]\nstore = \"ladon\"\n").unwrap();
+        let error = load_config(file.path().to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("[artur] is required"));
     }
 
     #[test]

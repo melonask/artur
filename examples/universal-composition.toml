@@ -10,11 +10,6 @@ format = "json"
 max_payload_bytes = 1048576
 shutdown_timeout_secs = 30
 
-[http]
-bind = "0.0.0.0"
-port = 46796
-prefix = "v1"
-
 [stores.artur]
 driver = "sqlite"
 url = "sqlite://data/artur/api.sqlite3"

@@ -23,6 +23,20 @@ pub enum ArturError {
     PaymentRequired(String),
     #[error("too many requests: {0}")]
     TooManyRequests(String),
+    #[error("unsupported media type: {0}")]
+    UnsupportedMediaType(String),
+    #[error("request timed out: {0}")]
+    Timeout(String),
+    #[error("rate limit exceeded")]
+    RateLimited {
+        retry_after: u64,
+        limit: u64,
+        window_secs: u64,
+    },
+    #[error("idempotency conflict: {0}")]
+    IdempotencyConflict(String),
+    #[error("idempotency key reuse mismatch: {0}")]
+    IdempotencyMismatch(String),
     #[error("payload too large: {0}")]
     PayloadTooLarge(String),
     #[error("io error: {0}")]
@@ -60,6 +74,11 @@ impl ArturError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::PaymentRequired(_) => StatusCode::PAYMENT_REQUIRED,
             Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::UnsupportedMediaType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Self::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
+            Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
+            Self::IdempotencyConflict(_) => StatusCode::CONFLICT,
+            Self::IdempotencyMismatch(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Http(_) => StatusCode::BAD_GATEWAY,
@@ -79,6 +98,11 @@ impl ArturError {
             Self::Forbidden(_) => "forbidden",
             Self::PaymentRequired(_) => "payment_required",
             Self::TooManyRequests(_) => "too_many_requests",
+            Self::UnsupportedMediaType(_) => "unsupported_media_type",
+            Self::Timeout(_) => "timeout",
+            Self::RateLimited { .. } => "rate_limited",
+            Self::IdempotencyConflict(_) => "idempotency_conflict",
+            Self::IdempotencyMismatch(_) => "idempotency_mismatch",
             Self::PayloadTooLarge(_) => "payload_too_large",
             Self::Io(_) => "io_error",
             Self::Http(_) => "http_error",
@@ -108,6 +132,34 @@ impl IntoResponse for ArturError {
             x402_version: is_payment_required.then_some(1),
             accepts: accepts.clone(),
         };
+        if let Self::RateLimited {
+            retry_after,
+            limit,
+            window_secs,
+        } = self
+        {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "retry-after",
+                HeaderValue::from_str(&retry_after.to_string())
+                    .unwrap_or(HeaderValue::from_static("1")),
+            );
+            headers.insert(
+                "ratelimit",
+                HeaderValue::from_str(&format!("\"{}\";r=0;t={retry_after}", limit))
+                    .unwrap_or(HeaderValue::from_static("\"0\";r=0;t=1")),
+            );
+            headers.insert(
+                "ratelimit-policy",
+                HeaderValue::from_str(&format!("\"{}\";q={limit};w={window_secs}", limit))
+                    .unwrap_or(HeaderValue::from_static("\"0\";q=0;w=1")),
+            );
+            headers.insert(
+                "content-type",
+                HeaderValue::from_static("application/problem+json"),
+            );
+            return (status, headers, Json(body)).into_response();
+        }
         if is_payment_required {
             let mut headers = HeaderMap::new();
             headers.insert("x402-version", HeaderValue::from_static("1"));
@@ -118,7 +170,19 @@ impl IntoResponse for ArturError {
             }
             (status, headers, Json(body)).into_response()
         } else {
-            (status, Json(body)).into_response()
+            let mut response = (status, Json(body)).into_response();
+            if matches!(
+                status,
+                StatusCode::TOO_MANY_REQUESTS
+                    | StatusCode::UNSUPPORTED_MEDIA_TYPE
+                    | StatusCode::GATEWAY_TIMEOUT
+            ) {
+                response.headers_mut().insert(
+                    "content-type",
+                    HeaderValue::from_static("application/problem+json"),
+                );
+            }
+            response
         }
     }
 }
