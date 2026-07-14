@@ -5,6 +5,7 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::OnceLock,
     time::Duration,
 };
 use tempfile::TempDir;
@@ -28,6 +29,7 @@ impl Drop for RunningArtur {
 
 #[tokio::test]
 async fn config_example_all_active_endpoints_succeed() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_path = write_example_config(temp_dir.path(), port);
@@ -122,6 +124,7 @@ async fn config_example_all_active_endpoints_succeed() {
 
 #[tokio::test]
 async fn api_key_guard_allows_with_correct_key() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -174,6 +177,7 @@ scheme = "Bearer"
 
 #[tokio::test]
 async fn challenge_guard_allows_on_ok_and_rejects_on_failure() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -266,6 +270,7 @@ stdout_format = "json"
 
 #[tokio::test]
 async fn x402_guard_returns_402_with_x402_version_header() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -313,6 +318,7 @@ stdout_format = "json"
 
 #[tokio::test]
 async fn failure_block_blocks_after_max_failures_then_expires() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -400,6 +406,7 @@ block_secs = 1
 
 #[tokio::test]
 async fn workflow_store_query_and_execute() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let db_path = temp_dir.path().join("test.db");
@@ -489,6 +496,7 @@ sql = "SELECT id, name FROM t ORDER BY id"
 
 #[tokio::test]
 async fn workflow_respond_step_returns_rendered_value() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -559,6 +567,7 @@ stdout_format = "json"
 
 #[tokio::test]
 async fn workflow_continue_on_error_keeps_pipeline_running() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -632,6 +641,7 @@ stdout_format = "json"
 
 #[tokio::test]
 async fn task_stdin_body_pipes_request_body() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -682,6 +692,7 @@ type = "body"
 
 #[tokio::test]
 async fn task_stdin_request_json_pipes_full_context() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -734,6 +745,7 @@ type = "request_json"
 
 #[tokio::test]
 async fn task_stdin_template_pipes_custom_string() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -787,6 +799,7 @@ template = "{{{{param.name}}}}:{{{{query.x}}}}"
 
 #[tokio::test]
 async fn task_env_vars_and_inherit() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -838,6 +851,7 @@ ARTUR_CUSTOM = "custom-value"
 
 #[tokio::test]
 async fn task_working_dir() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let work_dir = temp_dir.path().join("workdir");
@@ -889,6 +903,7 @@ working_dir = "{wd_escaped}"
 
 #[tokio::test]
 async fn task_custom_success_exit_codes() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -940,6 +955,7 @@ stdout_format = "text"
 
 #[tokio::test]
 async fn stdout_format_text_returns_raw_stdout_no_json_field() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -990,6 +1006,7 @@ stdout_format = "text"
 
 #[tokio::test]
 async fn static_response_custom_status_and_headers_and_methods() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -1065,6 +1082,7 @@ body = {{ ok = true }}
 
 #[tokio::test]
 async fn per_endpoint_body_limit_rejects_oversized_body() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -1115,6 +1133,7 @@ body = {{ ok = true }}
 
 #[tokio::test]
 async fn workflow_http_request_step_calls_own_endpoint() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -1175,6 +1194,7 @@ method = "GET"
 
 #[tokio::test]
 async fn template_placeholders_all_context_variables() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     unsafe {
@@ -1247,6 +1267,7 @@ stdout_format = "json"
 
 #[tokio::test]
 async fn server_defaults_without_explicit_artur_server_section() {
+    let _process_spawn_lock = process_spawn_lock().await;
     let temp_dir = TempDir::new().unwrap();
     let port = unused_port();
     let config_toml = format!(
@@ -1287,6 +1308,15 @@ body = {{ ok = true }}
 // ===========================================================================
 //  Helpers
 // ===========================================================================
+
+static PROCESS_SPAWN_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+async fn process_spawn_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    PROCESS_SPAWN_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
 
 async fn spawn_artur(config_path: &Path, port: u16, temp_dir: TempDir) -> RunningArtur {
     let mut child = Command::new(env!("CARGO_BIN_EXE_artur"))
