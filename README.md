@@ -134,6 +134,7 @@ Templates apply to task args/env/working directory/template stdin; rate/failure/
 | `{{request}}` / `{{request_json}}`, `{{body_json}}` | Full context / parsed JSON body. |
 | `{{param.name}}`, `{{query.name}}`, `{{header.name}}`, `{{env.NAME}}` | Path, query, lower-case header lookup, process environment. |
 | `{{body_json.user.id}}`, `{{body_json.items.0}}` | JSON paths, including array indexes. |
+| `{{steps}}` / `{{step}}` | Map of completed workflow step outputs. |
 | `{{steps.id.path}}` / `{{step.id.path}}` | Completed prior workflow step output. |
 
 ### Workflows, stores, and HTTP transports

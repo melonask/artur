@@ -3,10 +3,10 @@
 FROM rust:1.97-bookworm AS builder
 WORKDIR /usr/src/artur
 
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
-RUN cargo generate-lockfile && cargo build --release --locked
+RUN cargo build --release --locked
 
 FROM debian:bookworm-slim AS runtime
 

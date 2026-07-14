@@ -364,7 +364,7 @@ pub fn lookup_template_json_value(key: &str, request: &RequestContext) -> Option
         "body" => Some(Value::String(request.body.clone())),
         "request" | "request_json" => Some(request.request_json()),
         "body_json" => request.body_json.clone(),
-        "steps" => Some(Value::Object(
+        "steps" | "step" => Some(Value::Object(
             request
                 .steps
                 .iter()
@@ -543,5 +543,14 @@ mod tests {
         .unwrap();
         assert_eq!(rendered["sid"], "123");
         assert_eq!(rendered["request"]["method"], "POST");
+    }
+
+    #[test]
+    fn renders_root_step_aliases_as_step_output_maps() {
+        let context = context();
+        assert_eq!(
+            lookup_template_json_value("steps", &context),
+            lookup_template_json_value("step", &context)
+        );
     }
 }

@@ -171,7 +171,7 @@ action = "respond.static"           # (required)
 
 [artur.endpoints.response]
 status = 200                        # HTTP status code; default: 200
-body = { ok = true, service = "artur" }   # JSON response body; supports templates; default: {}
+body = { ok = true, service = "artur" }   # JSON response body; returned as configured; default: {}
 # [artur.endpoints.response.headers]
 # cache-control = "no-store"
 
@@ -333,5 +333,6 @@ continue_on_error = false           # keep going if this step fails; default: fa
 #   {{header.<name>}}       — request header value (lowercased name)
 #   {{env.<NAME>}}          — environment variable from the Artur process
 #   {{body_json.<path>}}    — field inside a JSON body, dot-separated (e.g. .items.0.name)
+#   {{steps}} / {{step}}    — map of completed workflow step outputs
 #   {{steps.<id>.<path>}}   — output from a previously executed workflow step
 #   {{step.<id>.<path>}}    — alias for {{steps.<id>.<path>}}

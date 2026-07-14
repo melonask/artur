@@ -155,6 +155,7 @@ A timeout returns `ok:false`, null `status_code`, `timed_out:true`; non-success 
 | `{{request}}` / `{{request_json}}`, `{{body_json}}` | Complete request JSON / parsed body. |
 | `{{param.NAME}}`, `{{query.NAME}}`, `{{header.name}}`, `{{env.NAME}}` | Path, query, lower-case header, process environment. |
 | `{{body_json.user.id}}`, `{{body_json.items.0}}` | Object fields and array indexes. |
+| `{{steps}}`, `{{step}}` | Map of completed workflow step outputs. |
 | `{{steps.ID.path}}`, `{{step.ID.path}}` | Output from completed earlier workflow steps. |
 
 Templates render in task args/env/working directory/template stdin; security values; workflow SQL/params/HTTP URL/headers/body/respond value/result body. Whole-value JSON templates preserve type; embedded object/array values stringify. Unknown variables render empty; unclosed `{{` is a config error.

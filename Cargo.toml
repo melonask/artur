@@ -19,6 +19,12 @@ include = [
   "docs/**",
   ".github/workflows/**",
   "README.md",
+  "SKILL.md",
+  "Config.example.toml",
+  "Dockerfile",
+  "docker-compose.yml",
+  "rustfmt.toml",
+  "logo.svg",
   "LICENSE",
   "Cargo.toml",
 ]
